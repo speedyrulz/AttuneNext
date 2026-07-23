@@ -1,0 +1,649 @@
+-- =========================================================================
+-- AttuneNext - Engine.lua
+-- Structural scanning of the server loot DB, classification of item
+-- sources, attunement stat computation and caching.
+-- =========================================================================
+local ADDON_NAME, ANx = ...
+local Engine = {}
+ANx.Engine = Engine
+
+-- ---------------------------------------------------------------------
+-- Caches
+-- ---------------------------------------------------------------------
+local instDiffCache = {}   -- ["map:diff"]    -> { itemIds }
+local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
+local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
+local srcCache      = {}   -- [itemId]        -> sources array
+local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
+local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
+local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
+
+function Engine.InvalidateStats()
+    statsCache = {}
+end
+
+function Engine.InvalidateAll()
+    instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
+        {}, {}, {}, {}, {}, {}, {}
+    Engine.scanJobs = {}
+    Engine.scanning = false
+end
+
+-- ---------------------------------------------------------------------
+-- Persistent structural cache (SavedVariables)
+-- Structure only - attunement progress is always read live, so cached
+-- sessions stay accurate. Invalidated when the server loot-DB version
+-- or the addon version changes, or via the Refresh button.
+-- ---------------------------------------------------------------------
+local function SetToArray(set)
+    local a = {}
+    for id in pairs(set) do
+        if type(id) == "number" then a[#a + 1] = id end
+    end
+    return a
+end
+
+local function ArrayToSet(a)
+    local s = {}
+    for _, id in ipairs(a) do s[id] = true end
+    return s
+end
+
+function Engine.ExportCache()
+    if not (ANx.db and ANx.LootDbLoaded()) then return end
+    local sums = {}
+    for exp, sum in pairs(summaryCache) do
+        if sum.ready then
+            sums[exp] = {
+                D = SetToArray(sum.D), R = SetToArray(sum.R), Q = SetToArray(sum.Q),
+                W = SetToArray(sum.W), V = SetToArray(sum.V), C = SetToArray(sum.C),
+            }
+        end
+    end
+    ANx.db.structCache = {
+        version = _G.ItemLocIsLoaded(),
+        rev = ANx.VERSION,
+        inst = instDiffCache,
+        zones = zoneCache,
+        summaries = sums,
+        savedAt = date and date("%Y-%m-%d %H:%M") or "",
+    }
+end
+
+-- Returns true if a valid cache was restored
+function Engine.ImportCache()
+    local sc = ANx.db and ANx.db.structCache
+    if not sc then return false end
+    if not ANx.LootDbLoaded() or sc.version ~= _G.ItemLocIsLoaded() or sc.rev ~= ANx.VERSION then
+        ANx.db.structCache = nil
+        return false
+    end
+    instDiffCache = sc.inst or {}
+    zoneCache = sc.zones or {}
+    summaryCache = {}
+    for exp, sum in pairs(sc.summaries or {}) do
+        summaryCache[exp] = {
+            D = ArrayToSet(sum.D or {}), R = ArrayToSet(sum.R or {}), Q = ArrayToSet(sum.Q or {}),
+            W = ArrayToSet(sum.W or {}), V = ArrayToSet(sum.V or {}), C = ArrayToSet(sum.C or {}),
+            ready = true,
+        }
+    end
+    return true
+end
+
+-- Full manual rescan (Refresh button / "/an reset")
+function Engine.ForceRescan()
+    if ANx.db then ANx.db.structCache = nil end
+    Engine.InvalidateAll()
+end
+
+-- ---------------------------------------------------------------------
+-- Background job pump (coroutine based, ~10ms/frame budget)
+-- ---------------------------------------------------------------------
+Engine.scanJobs = {}
+Engine.scanning = false
+local pumpFrame = CreateFrame("Frame")
+local BUDGET_MS = 10
+
+local function Clock()
+    if debugprofilestop then return debugprofilestop() end
+    return GetTime() * 1000
+end
+
+local yieldCheck = 0
+function Engine.MaybeYield()
+    yieldCheck = yieldCheck + 1
+    if yieldCheck >= 25 then
+        yieldCheck = 0
+        coroutine.yield()
+    end
+end
+
+pumpFrame:SetScript("OnUpdate", function()
+    local job = Engine.scanJobs[1]
+    if not job then
+        Engine.scanning = false
+        return
+    end
+    Engine.scanning = true
+    local start = Clock()
+    while Clock() - start < BUDGET_MS do
+        if coroutine.status(job.co) == "dead" then break end
+        local ok, err = coroutine.resume(job.co)
+        if not ok then
+            ANx.Print("|cffff4040scan error:|r " .. tostring(err))
+            break
+        end
+    end
+    if coroutine.status(job.co) == "dead" then
+        table.remove(Engine.scanJobs, 1)
+        if #Engine.scanJobs == 0 then
+            Engine.scanning = false
+            -- all scans done: persist the structural cache for next session
+            pcall(Engine.ExportCache)
+        end
+        if job.onDone then pcall(job.onDone) end
+    end
+end)
+
+function Engine.Enqueue(fn, onDone, tag)
+    -- avoid duplicate queued jobs for the same tag
+    if tag then
+        for _, j in ipairs(Engine.scanJobs) do
+            if j.tag == tag then return end
+        end
+    end
+    table.insert(Engine.scanJobs, { co = coroutine.create(fn), onDone = onDone, tag = tag })
+end
+
+-- ---------------------------------------------------------------------
+-- Sources (cached per item)
+-- ---------------------------------------------------------------------
+function Engine.Sources(itemId)
+    local s = srcCache[itemId]
+    if not s then
+        s = ANx.GetSources(itemId)
+        srcCache[itemId] = s
+    end
+    return s
+end
+
+local function ZoneNameMatch(a, b)
+    if not a or not b then return false end
+    return a:lower() == b:lower()
+end
+
+-- Best source for an item, preferring sources in the given zone name + src filter.
+-- Returns chance, sourceName, srcType, restricted(bool)
+function Engine.BestSource(itemId, zoneName, srcFilter)
+    local best, bestAny
+    for _, s in ipairs(Engine.Sources(itemId)) do
+        local typeOk = (not srcFilter) or srcFilter[s.srcType]
+        if typeOk then
+            if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
+            if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
+                if (not best) or s.chance > best.chance then best = s end
+            end
+        end
+    end
+    if best then return best.chance, best.objName, best.srcType, true end
+    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false end
+    return nil
+end
+
+-- ---------------------------------------------------------------------
+-- Instances
+-- ---------------------------------------------------------------------
+local function FetchInstDiff(map, diff)
+    local key = map .. ":" .. diff
+    local c = instDiffCache[key]
+    if not c then
+        c = ANx.ItemsInZone(ANx.BuildMapZoneId(map, diff))
+        instDiffCache[key] = c
+    end
+    return c
+end
+
+-- Resolved difficulty list for an instance (applies altDiffs fallback once)
+function Engine.InstanceDiffs(inst)
+    local r = instResolved[inst]
+    if r then return r end
+    r = {}
+    local total = 0
+    for _, d in ipairs(inst.diffs) do
+        local items = FetchInstDiff(inst.map, d[2])
+        total = total + #items
+        r[#r + 1] = { label = d[1], diff = d[2], items = items }
+    end
+    if total == 0 and inst.altDiffs then
+        local r2, total2 = {}, 0
+        for _, d in ipairs(inst.altDiffs) do
+            local items = FetchInstDiff(inst.map, d[2])
+            total2 = total2 + #items
+            r2[#r2 + 1] = { label = d[1], diff = d[2], items = items }
+        end
+        if total2 > 0 then r = r2 end
+    end
+    instResolved[inst] = r
+    return r
+end
+
+function Engine.InstancesFor(exp, kind)
+    local out = {}
+    for _, inst in ipairs(ANx.Instances) do
+        if inst.exp == exp and inst.kind == kind then out[#out + 1] = inst end
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------
+-- Open world zones
+-- ---------------------------------------------------------------------
+-- Builds and caches the classification for one zone. Safe to call from a
+-- coroutine (yields periodically) or synchronously.
+function Engine.ZoneData(zoneEntry, inCoroutine)
+    local zc = zoneCache[zoneEntry.zone]
+    if zc then return zc end
+
+    local universe = ANx.ItemsInZone(zoneEntry.zone)
+    zc = {
+        universe = universe,
+        quest = {},          -- itemIds with a quest source in this zone
+        questList = {},      -- { {id=questId, name=questName, items={itemIds}} }
+        world = {},          -- itemIds that drop from creatures/objects in this zone
+        vendor = {},         -- itemIds sold by vendors in this zone
+        vendorByName = {},   -- [vendorName] = { itemIds }
+        vendorIdByName = {}, -- [vendorName] = npcId
+    }
+    local questsById = {}
+    for _, itemId in ipairs(universe) do
+        if inCoroutine then Engine.MaybeYield() end
+        local sources = Engine.Sources(itemId)
+        local isQuest, isWorld, isVendor = false, false, false
+        for _, s in ipairs(sources) do
+            if ZoneNameMatch(s.zoneName, zoneEntry.name) then
+                if s.srcType == ANx.SRC.QUEST then
+                    isQuest = true
+                    local q = questsById[s.objId]
+                    if not q then
+                        q = { id = s.objId, name = s.objName, items = {} }
+                        questsById[s.objId] = q
+                        zc.questList[#zc.questList + 1] = q
+                    end
+                    q.items[#q.items + 1] = itemId
+                elseif s.srcType == ANx.SRC.VENDOR then
+                    isVendor = true
+                    local list = zc.vendorByName[s.objName]
+                    if not list then
+                        list = {}
+                        zc.vendorByName[s.objName] = list
+                    end
+                    list[#list + 1] = itemId
+                    if s.objId and s.objId > 0 and not zc.vendorIdByName[s.objName] then
+                        zc.vendorIdByName[s.objName] = s.objId
+                    end
+                elseif ANx.WORLD_DROP_SRC[s.srcType] then
+                    isWorld = true
+                end
+            end
+        end
+        if isQuest then zc.quest[#zc.quest + 1] = itemId end
+        if isWorld then zc.world[#zc.world + 1] = itemId end
+        if isVendor then zc.vendor[#zc.vendor + 1] = itemId end
+    end
+    table.sort(zc.questList, function(a, b) return (a.name or "") < (b.name or "") end)
+    zoneCache[zoneEntry.zone] = zc
+    return zc
+end
+
+function Engine.ZoneReady(zoneEntry)
+    return zoneCache[zoneEntry.zone] ~= nil
+end
+
+function Engine.ZonesFor(exp, includeCities, citiesOnlyMode)
+    local out = {}
+    for _, z in ipairs(ANx.Zones) do
+        if z.exp == exp then
+            if citiesOnlyMode then
+                out[#out + 1] = z
+            elseif includeCities or not z.city then
+                out[#out + 1] = z
+            end
+        end
+    end
+    return out
+end
+
+-- ---------------------------------------------------------------------
+-- Professions
+-- ---------------------------------------------------------------------
+function Engine.ProfessionEntries(prof, exp)
+    local key = prof .. "-" .. exp
+    local c = profCache[key]
+    if c then return c end
+    c = {}
+    local rows = ANx.ProfessionItems and ANx.ProfessionItems[prof]
+    if rows then
+        for _, row in ipairs(rows) do
+            local itemId, spellId, skill, rowExp = row[1], row[2], row[3], row[4]
+            if rowExp == exp and ANx.IsAttunableAtAll(itemId) then
+                c[#c + 1] = { id = itemId, spell = spellId, skill = skill }
+            end
+        end
+        table.sort(c, function(a, b) return a.skill < b.skill end)
+    end
+    profCache[key] = c
+    return c
+end
+
+-- ---------------------------------------------------------------------
+-- Stats
+-- ---------------------------------------------------------------------
+-- Character-scope stats for a plain list of itemIds.
+-- Returns { attuned=, total= } (cached under key if given)
+function Engine.Stats(itemIds, key)
+    if key and statsCache[key] then return statsCache[key] end
+    local attuned, total = 0, 0
+    for _, id in ipairs(itemIds) do
+        if ANx.CanCount(id) and ANx.FactionAllowed(id) then
+            total = total + 1
+            if ANx.CountAttuned(id) then attuned = attuned + 1 end
+        end
+    end
+    local r = { attuned = attuned, total = total }
+    if key then statsCache[key] = r end
+    return r
+end
+
+-- Stats + best unattuned item (highest drop chance) for a node.
+-- zoneName restricts the chance lookup to sources in that zone; srcFilter
+-- restricts by source type.
+function Engine.StatsWithBest(itemIds, key, zoneName, srcFilter)
+    if key and statsCache[key] then return statsCache[key] end
+    local attuned, total = 0, 0
+    local best
+    for _, id in ipairs(itemIds) do
+        if ANx.CanCount(id) and ANx.FactionAllowed(id) then
+            total = total + 1
+            if ANx.CountAttuned(id) then
+                attuned = attuned + 1
+            else
+                local chance, srcName = Engine.BestSource(id, zoneName, srcFilter)
+                if chance and ((not best) or chance > best.chance) then
+                    best = { id = id, chance = chance, srcName = srcName }
+                end
+            end
+        end
+    end
+    local r = { attuned = attuned, total = total, best = best }
+    if key then statsCache[key] = r end
+    return r
+end
+
+-- Detailed remaining-item rows for the item list screens, sorted by chance desc.
+-- Returns { {id, chance, srcName, srcType, attuned, acct}, ... }
+function Engine.ItemRows(itemIds, zoneName, srcFilter, includeAttuned)
+    local rows = {}
+    local seen = {}
+    for _, id in ipairs(itemIds) do
+        if not seen[id] and ANx.CanCount(id) and ANx.FactionAllowed(id) then
+            seen[id] = true
+            local isAtt = ANx.CountAttuned(id)
+            if includeAttuned or not isAtt then
+                local chance, srcName, srcType = Engine.BestSource(id, zoneName, srcFilter)
+                rows[#rows + 1] = {
+                    id = id, chance = chance or 0, srcName = srcName,
+                    srcType = srcType, attuned = isAtt,
+                    acct = (not isAtt) and ANx.AccountHasVariant(id) or false,
+                    progress = ANx.Progress(id),
+                }
+            end
+        end
+    end
+    table.sort(rows, function(a, b)
+        if a.attuned ~= b.attuned then return not a.attuned end
+        return a.chance > b.chance
+    end)
+    return rows
+end
+
+-- ---------------------------------------------------------------------
+-- Vendor currency layer (uses merchant scan data from MerchantScan.lua)
+-- ---------------------------------------------------------------------
+local UNKNOWN_CURRENCY = "Unknown (visit vendor to scan)"
+ANx.UNKNOWN_CURRENCY = UNKNOWN_CURRENCY
+
+-- Static costs from Data_VendorCosts.lua, decoded to { {name=,count=}, ... } variants
+local function StaticCosts(itemId)
+    local raw = ANx.VendorCosts and ANx.VendorCosts[itemId]
+    if not raw then return nil end
+    local out = {}
+    for _, v in ipairs(raw) do
+        local cost = {}
+        for i = 1, #v - 1, 2 do
+            cost[#cost + 1] = {
+                name = (ANx.VendorCurrencyNames and ANx.VendorCurrencyNames[v[i]]) or "?",
+                count = v[i + 1],
+            }
+        end
+        if #cost > 0 then out[#out + 1] = cost end
+    end
+    if #out > 0 then return out end
+    return nil
+end
+
+local function CostSignature(cost)
+    local parts = {}
+    for _, c in ipairs(cost) do parts[#parts + 1] = c.name .. ":" .. c.count end
+    table.sort(parts)
+    return table.concat(parts, "|")
+end
+
+-- All known ways to buy an item: live merchant scan first (server truth,
+-- covers Synastria customs), then static TDB variants (deduped).
+function Engine.ItemAllCosts(itemId)
+    local out, seen = {}, {}
+    local scanned = ANx.db and ANx.db.merchant and ANx.db.merchant[itemId]
+    if scanned and #scanned > 0 then
+        out[#out + 1] = scanned
+        seen[CostSignature(scanned)] = true
+    end
+    local static = StaticCosts(itemId)
+    if static then
+        for _, cost in ipairs(static) do
+            local sig = CostSignature(cost)
+            if not seen[sig] then
+                seen[sig] = true
+                out[#out + 1] = cost
+            end
+        end
+    end
+    if #out > 0 then return out end
+    return nil
+end
+
+-- Back-compat: primary (scanned or first static) cost variant
+function Engine.ItemCurrencies(itemId)
+    local all = Engine.ItemAllCosts(itemId)
+    return all and all[1] or nil
+end
+
+-- Currency category classification (shared by the vendor filter UI)
+function Engine.CurrencyCategory(name)
+    if name == "Gold" then return "gold" end
+    if name == "Honor Points" or name == "Arena Points" then return "points" end
+    if name == UNKNOWN_CURRENCY then return "unknown" end
+    if name:find("^Emblem") or name:find("^Badge") or name:find("^Mark")
+        or name:find("Trophy") or name:find("^Sigil") or name:find("^Splinter")
+        or name:find("^Seal") or name:find("^Champion's") then
+        return "emblem"
+    end
+    return "token"
+end
+
+-- A zone's vendor items restricted to a currency category ("all" = everything,
+-- "unknown" matches items with no cost data).
+function Engine.VendorItemsMatchingCategory(zoneEntry, category)
+    local zc = Engine.ZoneData(zoneEntry)
+    if not category or category == "all" then return zc.vendor end
+    local out = {}
+    for _, itemId in ipairs(zc.vendor) do
+        local all = Engine.ItemAllCosts(itemId)
+        if all then
+            local hit = false
+            for _, cost in ipairs(all) do
+                for _, c in ipairs(cost) do
+                    if Engine.CurrencyCategory(c.name) == category then
+                        hit = true
+                        break
+                    end
+                end
+                if hit then break end
+            end
+            if hit then out[#out + 1] = itemId end
+        elseif category == "unknown" then
+            out[#out + 1] = itemId
+        end
+    end
+    return out
+end
+
+-- Group a zone's vendor items by currency name (an item purchasable with
+-- several currencies appears under each). Unknown bucket only for items
+-- with no scan AND no static data.
+-- Returns array { {name=currencyName, items={itemIds}}, ... } sorted by name,
+-- with Unknown last.
+function Engine.CurrenciesForZone(zoneEntry)
+    local zc = Engine.ZoneData(zoneEntry)
+    local byName, order = {}, {}
+    local function Bucket(name)
+        local bucket = byName[name]
+        if not bucket then
+            bucket = { name = name, items = {}, seen = {} }
+            byName[name] = bucket
+            order[#order + 1] = bucket
+        end
+        return bucket
+    end
+    for _, itemId in ipairs(zc.vendor) do
+        local all = Engine.ItemAllCosts(itemId)
+        if all then
+            for _, cost in ipairs(all) do
+                for _, c in ipairs(cost) do
+                    local bucket = Bucket(c.name)
+                    if not bucket.seen[itemId] then
+                        bucket.seen[itemId] = true
+                        bucket.items[#bucket.items + 1] = itemId
+                    end
+                end
+            end
+        else
+            local bucket = Bucket(UNKNOWN_CURRENCY)
+            if not bucket.seen[itemId] then
+                bucket.seen[itemId] = true
+                bucket.items[#bucket.items + 1] = itemId
+            end
+        end
+    end
+    table.sort(order, function(a, b)
+        if a.name == UNKNOWN_CURRENCY then return false end
+        if b.name == UNKNOWN_CURRENCY then return true end
+        return a.name < b.name
+    end)
+    return order
+end
+
+-- Vendors in a zone selling items from the given list.
+-- Returns array { {name=vendorName, items={itemIds}}, ... }
+function Engine.VendorsForItems(zoneEntry, itemIds)
+    local inList = {}
+    for _, id in ipairs(itemIds) do inList[id] = true end
+    local zc = Engine.ZoneData(zoneEntry)
+    local out = {}
+    for vendorName, list in pairs(zc.vendorByName) do
+        local matched = {}
+        for _, id in ipairs(list) do
+            if inList[id] then matched[#matched + 1] = id end
+        end
+        if #matched > 0 then
+            out[#out + 1] = { name = vendorName, items = matched,
+                id = zc.vendorIdByName and zc.vendorIdByName[vendorName] or nil }
+        end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
+end
+
+-- ---------------------------------------------------------------------
+-- Expansion / content summaries (background scanned)
+-- ---------------------------------------------------------------------
+local function AddSet(set, ids)
+    for _, id in ipairs(ids) do set[id] = true end
+end
+
+local function BuildSummary(exp)
+    local sum = { D = {}, R = {}, Q = {}, W = {}, V = {}, C = {} }
+    -- dungeons + raids
+    for _, kind in ipairs({ "D", "R" }) do
+        for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
+            for _, d in ipairs(Engine.InstanceDiffs(inst)) do
+                Engine.MaybeYield()
+                AddSet(sum[kind], d.items)
+            end
+        end
+    end
+    -- zones (quest + world drops + vendors)
+    for _, z in ipairs(Engine.ZonesFor(exp, true)) do
+        local zc = Engine.ZoneData(z, true)
+        if not z.city then
+            AddSet(sum.Q, zc.quest)
+            AddSet(sum.W, zc.world)
+        end
+        AddSet(sum.V, zc.vendor)
+        Engine.MaybeYield()
+    end
+    -- professions
+    for _, prof in ipairs(ANx.ProfessionOrder or {}) do
+        for _, e in ipairs(Engine.ProfessionEntries(prof, exp)) do
+            sum.C[e.id] = true
+        end
+        Engine.MaybeYield()
+    end
+    sum.ready = true
+    summaryCache[exp] = sum
+end
+
+-- Returns summary sets or nil if still scanning (auto-enqueues the scan)
+function Engine.GetSummary(exp, onDone)
+    local s = summaryCache[exp]
+    if s and s.ready then return s end
+    Engine.Enqueue(function() BuildSummary(exp) end, onDone, "summary" .. exp)
+    return nil
+end
+
+function Engine.SetStats(set, key)
+    if key and statsCache[key] then return statsCache[key] end
+    local attuned, total = 0, 0
+    for id in pairs(set) do
+        if type(id) == "number" and ANx.CanCount(id) and ANx.FactionAllowed(id) then
+            total = total + 1
+            if ANx.CountAttuned(id) then attuned = attuned + 1 end
+        end
+    end
+    local r = { attuned = attuned, total = total }
+    if key then statsCache[key] = r end
+    return r
+end
+
+function Engine.UnionStats(sets, key)
+    if key and statsCache[key] then return statsCache[key] end
+    local union = {}
+    for _, set in ipairs(sets) do
+        for id in pairs(set) do
+            if type(id) == "number" then union[id] = true end
+        end
+    end
+    local r = Engine.SetStats(union)
+    if key then statsCache[key] = r end
+    return r
+end

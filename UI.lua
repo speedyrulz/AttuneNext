@@ -1,0 +1,976 @@
+-- =========================================================================
+-- AttuneNext - UI.lua
+-- Menu-driven browser:
+--   Expansion -> Content type -> Dungeon/Raid (w/ difficulty) or
+--   Zone (Quest / World Drop / Vendor->Currency->Vendor) or Profession
+--   -> remaining item lists sorted by drop rate -> item source detail
+-- =========================================================================
+local ADDON_NAME, ANx = ...
+local Engine
+local UI = {}
+ANx.UI = UI
+
+local ROW_H = 34
+local VISIBLE_ROWS = 13
+local FRAME_W = 660
+
+local DIFF_LABELS = {
+    [""] = "Browse", ["N"] = "Normal", ["H"] = "Heroic", ["M"] = "Mythic",
+    ["10"] = "10 Player", ["25"] = "25 Player",
+    ["10N"] = "10 Normal", ["25N"] = "25 Normal",
+    ["10H"] = "10 Heroic", ["25H"] = "25 Heroic",
+}
+
+local CONTENT_DEFS = {
+    { key = "D", label = "Dungeons" },
+    { key = "R", label = "Raids" },
+    { key = "Q", label = "Quests" },
+    { key = "W", label = "Zone World Drops" },
+    { key = "V", label = "Vendors" },
+    { key = "C", label = "Crafting" },
+}
+
+-- ---------------------------------------------------------------------
+-- Sorting configuration
+-- ---------------------------------------------------------------------
+local NODE_SORTS = { "default", "name", "pct", "left" }
+local ITEM_SORTS = { "chance", "name", "progress" }
+local SORT_LABELS = {
+    default = "Default", name = "Name", pct = "Attuned %",
+    left = "Attunes Left", chance = "Drop %", progress = "Progress",
+}
+local SORTABLE_NODE_VIEWS = {
+    instances = true, zones = true, quests = true,
+    currencies = true, vendors = true, profs = true,
+}
+
+local function ViewSortModes(view)
+    if not view then return nil end
+    if view.type == "items" then return ITEM_SORTS end
+    if SORTABLE_NODE_VIEWS[view.type] then return NODE_SORTS end
+    return nil
+end
+
+local function CurrentSort(view)
+    local modes = ViewSortModes(view)
+    if not modes then return nil end
+    local m = ANx.db and ANx.db.sort and ANx.db.sort[view.type]
+    for _, mm in ipairs(modes) do
+        if mm == m then return m end
+    end
+    return modes[1]
+end
+
+local function CycleSort(view)
+    local modes = ViewSortModes(view)
+    if not modes then return end
+    local cur = CurrentSort(view)
+    for i, m in ipairs(modes) do
+        if m == cur then
+            ANx.db.sort[view.type] = modes[(i % #modes) + 1]
+            return
+        end
+    end
+    ANx.db.sort[view.type] = modes[1]
+end
+
+-- ---------------------------------------------------------------------
+-- Vendor currency-category filter
+-- ---------------------------------------------------------------------
+local VENDOR_FILTERS = { "all", "gold", "points", "emblem", "token" }
+local VENDOR_FILTER_LABELS = {
+    all = "All Currencies", gold = "Gold", points = "Honor & Arena",
+    emblem = "Emblems & Marks", token = "Other Tokens",
+}
+
+-- true if the currency-type filter button applies to this view
+local function ViewHasVendorFilter(view)
+    if not view then return false end
+    return view.type == "currencies" or (view.type == "zones" and view.mode == "V")
+end
+
+local function CycleVendorFilter()
+    local cur = ANx.db.vendorFilter or "all"
+    for i, f in ipairs(VENDOR_FILTERS) do
+        if f == cur then
+            ANx.db.vendorFilter = VENDOR_FILTERS[(i % #VENDOR_FILTERS) + 1]
+            return
+        end
+    end
+    ANx.db.vendorFilter = "all"
+end
+
+-- ---------------------------------------------------------------------
+-- Navigation stack
+-- ---------------------------------------------------------------------
+UI.stack = {}
+
+function UI.Push(view)
+    table.insert(UI.stack, view)
+    UI.Render()
+end
+
+function UI.Pop()
+    if #UI.stack > 1 then
+        table.remove(UI.stack)
+        UI.Render()
+    end
+end
+
+function UI.Current()
+    return UI.stack[#UI.stack]
+end
+
+function UI.RefreshIfShown()
+    if UI.frame and UI.frame:IsShown() then
+        UI.Render()
+    end
+end
+
+-- ---------------------------------------------------------------------
+-- Frame construction
+-- ---------------------------------------------------------------------
+local rowButtons = {}
+
+local function CreateMainFrame()
+    Engine = ANx.Engine
+    local f = CreateFrame("Frame", "AttuneNextFrame", UIParent)
+    f:SetWidth(FRAME_W)
+    f:SetHeight(ROW_H * VISIBLE_ROWS + 122)
+    f:SetPoint("CENTER", 0, 40)
+    f:SetFrameStrata("HIGH")
+    f:EnableMouse(true)
+    f:SetMovable(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:SetScale(ANx.db and ANx.db.scale or 1)
+
+    f:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 },
+    })
+
+    -- title
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", 0, -16)
+    title:SetText("|cff33ff99Attune|r|cffffffffNext|r")
+    f.title = title
+
+    -- close
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -6, -8)
+
+    -- back button
+    local back = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    back:SetWidth(60); back:SetHeight(20)
+    back:SetPoint("TOPLEFT", 16, -14)
+    back:SetText("< Back")
+    back:SetScript("OnClick", UI.Pop)
+    f.back = back
+
+    -- refresh button (full manual rescan of the loot DB)
+    local refresh = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    refresh:SetWidth(60); refresh:SetHeight(20)
+    refresh:SetPoint("TOPRIGHT", -30, -14)
+    refresh:SetText("Rescan")
+    refresh:SetScript("OnClick", function()
+        Engine.ForceRescan()
+        ANx.Print("Manual rescan started (saved cache cleared).")
+        UI.Render()
+    end)
+
+    -- breadcrumb
+    local crumb = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    crumb:SetPoint("TOP", 0, -38)
+    crumb:SetWidth(FRAME_W - 60)
+    crumb:SetJustifyH("CENTER")
+    f.crumb = crumb
+
+    -- ---------- toolbar row (scope / faction / sort / currency) ----------
+    -- scope: current character vs whole account
+    local scopeBtn = CreateFrame("Button", "AttuneNextScopeBtn", f, "UIPanelButtonTemplate")
+    scopeBtn:SetWidth(150); scopeBtn:SetHeight(20)
+    scopeBtn:SetPoint("TOPLEFT", 16, -56)
+    scopeBtn:SetText("Attunes: Character")
+    scopeBtn:SetScript("OnClick", function()
+        ANx.db.scope = (ANx.db.scope == "account") and "char" or "account"
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.scopeBtn = scopeBtn
+
+    -- faction filter: Both / Alliance / Horde
+    local factionBtn = CreateFrame("Button", "AttuneNextFactionBtn", f, "UIPanelButtonTemplate")
+    factionBtn:SetWidth(140); factionBtn:SetHeight(20)
+    factionBtn:SetPoint("LEFT", scopeBtn, "RIGHT", 6, 0)
+    factionBtn:SetText("Faction: Both")
+    factionBtn:SetScript("OnClick", function()
+        local cur = ANx.db.faction or "both"
+        ANx.db.faction = (cur == "both") and "A" or (cur == "A") and "H" or "both"
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.factionBtn = factionBtn
+
+    -- sort cycle button
+    local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
+    sortBtn:SetWidth(150); sortBtn:SetHeight(20)
+    sortBtn:SetPoint("LEFT", factionBtn, "RIGHT", 6, 0)
+    sortBtn:SetText("Sort: Default")
+    sortBtn:SetScript("OnClick", function()
+        CycleSort(UI.Current())
+        UI.Render()
+    end)
+    f.sortBtn = sortBtn
+
+    -- vendor currency filter cycle button
+    local filterBtn = CreateFrame("Button", "AttuneNextFilterBtn", f, "UIPanelButtonTemplate")
+    filterBtn:SetWidth(180); filterBtn:SetHeight(20)
+    filterBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    filterBtn:SetText("Currency: All")
+    filterBtn:SetScript("OnClick", function()
+        CycleVendorFilter()
+        UI.Render()
+    end)
+    f.filterBtn = filterBtn
+
+    -- scroll area
+    local scroll = CreateFrame("ScrollFrame", "AttuneNextScroll", f, "FauxScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 16, -82)
+    scroll:SetPoint("BOTTOMRIGHT", -36, 38)
+    scroll:SetScript("OnVerticalScroll", function(self, offset)
+        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.Render)
+    end)
+    f.scroll = scroll
+
+    -- rows
+    for i = 1, VISIBLE_ROWS do
+        local b = CreateFrame("Button", "AttuneNextRow" .. i, f)
+        b:SetWidth(FRAME_W - 56)
+        b:SetHeight(ROW_H)
+        b:SetPoint("TOPLEFT", 20, -82 - (i - 1) * ROW_H)
+        b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+
+        b.icon = b:CreateTexture(nil, "ARTWORK")
+        b.icon:SetWidth(28); b.icon:SetHeight(28)
+        b.icon:SetPoint("LEFT", 2, 0)
+
+        b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        b.text:SetPoint("TOPLEFT", 36, -3)
+        b.text:SetJustifyH("LEFT")
+        b.text:SetWidth(FRAME_W - 300)
+
+        b.sub = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.sub:SetPoint("BOTTOMLEFT", 36, 3)
+        b.sub:SetJustifyH("LEFT")
+        b.sub:SetWidth(FRAME_W - 300)
+        b.sub:SetTextColor(0.7, 0.7, 0.7)
+
+        b.right = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        b.right:SetPoint("TOPRIGHT", -6, -3)
+        b.right:SetJustifyH("RIGHT")
+
+        b.right2 = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.right2:SetPoint("BOTTOMRIGHT", -6, 3)
+        b.right2:SetJustifyH("RIGHT")
+        b.right2:SetTextColor(0.6, 0.6, 0.6)
+
+        b:SetScript("OnClick", function(self)
+            if self.onClick then self.onClick(self) end
+        end)
+        b:SetScript("OnEnter", function(self)
+            if self.tooltipItem then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "item:" .. self.tooltipItem)
+                if not ok then GameTooltip:SetText("Item #" .. self.tooltipItem) end
+                GameTooltip:Show()
+            elseif self.tooltipText then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(self.tooltipText, 1, 1, 1, 1, true)
+                GameTooltip:Show()
+            end
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        rowButtons[i] = b
+    end
+
+    -- footer: status + show-attuned checkbox
+    local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    status:SetPoint("BOTTOMLEFT", 18, 20)
+    status:SetJustifyH("LEFT")
+    f.status = status
+
+    local cb = CreateFrame("CheckButton", "AttuneNextShowAttuned", f, "UICheckButtonTemplate")
+    cb:SetWidth(22); cb:SetHeight(22)
+    cb:SetPoint("BOTTOMRIGHT", -150, 14)
+    _G[cb:GetName() .. "Text"]:SetText("Show attuned items")
+    cb:SetScript("OnClick", function(self)
+        ANx.db.showAttuned = self:GetChecked() and true or false
+        UI.Render()
+    end)
+    f.showAttunedCb = cb
+
+    tinsert(UISpecialFrames, "AttuneNextFrame")
+    f:Hide()
+    return f
+end
+
+-- ---------------------------------------------------------------------
+-- Row helpers
+-- ---------------------------------------------------------------------
+local displayRows = {}   -- flattened row descriptors for current view
+
+local function AddRow(r)
+    displayRows[#displayRows + 1] = r
+end
+
+local function ResetRows()
+    for i = #displayRows, 1, -1 do displayRows[i] = nil end
+end
+
+-- Sortable node rows: builders collect via AddNodeRow, then FlushNodeRows
+-- applies the page's sort mode (name asc / attuned% desc / left desc).
+local nodeRows = {}
+
+local function AddNodeRow(sortName, st, rowDesc)
+    rowDesc._sName = (sortName or ""):lower()
+    if st and st.total and st.total > 0 then
+        rowDesc._sPct = st.attuned / st.total
+        rowDesc._sLeft = st.total - st.attuned
+    else
+        rowDesc._sPct, rowDesc._sLeft = -1, -1
+    end
+    nodeRows[#nodeRows + 1] = rowDesc
+end
+
+local function FlushNodeRows(mode)
+    if mode == "name" then
+        table.sort(nodeRows, function(a, b) return a._sName < b._sName end)
+    elseif mode == "pct" then
+        table.sort(nodeRows, function(a, b)
+            if a._sPct ~= b._sPct then return a._sPct > b._sPct end
+            return a._sName < b._sName
+        end)
+    elseif mode == "left" then
+        table.sort(nodeRows, function(a, b)
+            if a._sLeft ~= b._sLeft then return a._sLeft > b._sLeft end
+            return a._sName < b._sName
+        end)
+    end
+    for _, r in ipairs(nodeRows) do AddRow(r) end
+    for i = #nodeRows, 1, -1 do nodeRows[i] = nil end
+end
+
+local QUALITY_HEX = {}
+local function QualityHex(q)
+    if not QUALITY_HEX[q] then
+        local c = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+        QUALITY_HEX[q] = c and c.hex or "|cffffffff"
+    end
+    return QUALITY_HEX[q]
+end
+
+local function BestLine(best)
+    if not best then return "" end
+    local name = ANx.GetItemDisplay(best.id)
+    return string.format("|cffffd100Best:|r %s |cff00ff88(%s)|r%s",
+        name, ANx.FormatChance(best.chance),
+        best.srcName and (" |cff888888- " .. best.srcName .. "|r") or "")
+end
+
+local function SrcTypeLabel(t)
+    local S = ANx.SRC
+    if t == S.QUEST then return "Quest"
+    elseif t == S.VENDOR then return "Vendor"
+    elseif t == S.CRAFT_TRAINER then return "Craft (trainer)"
+    elseif t == S.CRAFT_RECIPE then return "Craft (recipe)"
+    elseif t == S.OBJECT or t == S.MYTHIC_GO then return "Chest"
+    elseif t == S.ITEM then return "Container"
+    elseif t == S.FISHING or t == S.FISHING_NODE then return "Fishing"
+    elseif t == S.PICKPOCKET then return "Pickpocket"
+    elseif t == S.ACHIEVEMENT then return "Achievement"
+    elseif t == S.PLAYER then return "Player"
+    end
+    return "Drop"
+end
+
+-- ---------------------------------------------------------------------
+-- View builders (each fills displayRows)
+-- ---------------------------------------------------------------------
+local builders = {}
+
+local function SummaryRow(exp, onReady)
+    local sum = Engine.GetSummary(exp, onReady)
+    if not sum then return nil end
+    return sum
+end
+
+builders["home"] = function(view)
+    for exp = 1, 3 do
+        local sum = SummaryRow(exp, UI.RefreshIfShown)
+        local rightText, subText
+        if sum then
+            local st = Engine.UnionStats({ sum.D, sum.R, sum.Q, sum.W, sum.V, sum.C }, "sum:" .. exp .. ":all")
+            rightText = ANx.StatsString(st.attuned, st.total)
+            subText = ""
+        else
+            rightText = "|cff888888Scanning...|r"
+            subText = "Building item database for this expansion"
+        end
+        AddRow({
+            text = ANx.EXP_COLORS[exp] .. ANx.EXP_NAMES[exp] .. "|r",
+            sub = subText, right = rightText,
+            onClick = function() UI.Push({ type = "content", exp = exp }) end,
+        })
+    end
+    local scopeText = (ANx.db.scope == "account")
+        and "Counts are ACCOUNT-wide (any character). Use the Attunes button to switch."
+        or "Counts are for items THIS character can attune. Use the Attunes button to switch."
+    AddRow({
+        text = "|cff888888How it works|r",
+        sub = scopeText,
+        tooltipText = "Character scope: counts every item the current character can attune (class, armor and level are checked by the server), attuned = 100% progress.\n\nAccount scope: counts every attunable item, attuned = any variant done by any character on your account.\n\nThe Faction button hides quests, vendors and gear locked to the other faction.\n\nDrop rates and sources come straight from Synastria's built-in loot database.",
+    })
+end
+
+builders["content"] = function(view)
+    local exp = view.exp
+    local sum = SummaryRow(exp, UI.RefreshIfShown)
+    for _, def in ipairs(CONTENT_DEFS) do
+        local rightText = "|cff888888Scanning...|r"
+        if sum then
+            local st = Engine.SetStats(sum[def.key], "sum:" .. exp .. ":" .. def.key)
+            rightText = ANx.StatsString(st.attuned, st.total)
+        end
+        AddRow({
+            text = def.label,
+            right = rightText,
+            onClick = function()
+                if def.key == "D" or def.key == "R" then
+                    UI.Push({ type = "instances", exp = exp, kind = def.key })
+                elseif def.key == "Q" then
+                    UI.Push({ type = "zones", exp = exp, mode = "Q" })
+                elseif def.key == "W" then
+                    UI.Push({ type = "zones", exp = exp, mode = "W" })
+                elseif def.key == "V" then
+                    UI.Push({ type = "zones", exp = exp, mode = "V" })
+                else
+                    UI.Push({ type = "profs", exp = exp })
+                end
+            end,
+        })
+    end
+end
+
+builders["instances"] = function(view)
+    local list = Engine.InstancesFor(view.exp, view.kind)
+    local mode = CurrentSort(view)
+    -- build one group per instance (header + difficulty rows stay together),
+    -- sorted by the instance's aggregate stats
+    local groups = {}
+    for _, inst in ipairs(list) do
+        local diffs = Engine.InstanceDiffs(inst)
+        local group = { name = inst.name:lower(), rows = {}, att = 0, tot = 0 }
+        if #diffs == 1 then
+            local d = diffs[1]
+            local key = "i:" .. inst.map .. ":" .. d.diff
+            local st = Engine.StatsWithBest(d.items, key, inst.name, ANx.INSTANCE_DROP_SRC)
+            group.att, group.tot = st.attuned, st.total
+            group.rows[1] = {
+                text = inst.name,
+                sub = BestLine(st.best),
+                right = ANx.StatsString(st.attuned, st.total),
+                onClick = function()
+                    UI.Push({ type = "items", title = inst.name, items = d.items,
+                        zoneName = inst.name, srcFilter = ANx.INSTANCE_DROP_SRC })
+                end,
+            }
+        else
+            group.rows[1] = { text = "|cffffd100" .. inst.name .. "|r", header = true }
+            for _, d in ipairs(diffs) do
+                local key = "i:" .. inst.map .. ":" .. d.diff
+                local st = Engine.StatsWithBest(d.items, key, inst.name, ANx.INSTANCE_DROP_SRC)
+                group.att = group.att + st.attuned
+                group.tot = group.tot + st.total
+                local label = DIFF_LABELS[d.label] or d.label
+                group.rows[#group.rows + 1] = {
+                    text = "    |cffcccccc" .. label .. "|r",
+                    sub = "      " .. BestLine(st.best),
+                    right = ANx.StatsString(st.attuned, st.total),
+                    onClick = function()
+                        UI.Push({ type = "items", title = inst.name .. " (" .. label .. ")",
+                            items = d.items, zoneName = inst.name, srcFilter = ANx.INSTANCE_DROP_SRC })
+                    end,
+                }
+            end
+        end
+        groups[#groups + 1] = group
+    end
+    if mode == "name" then
+        table.sort(groups, function(a, b) return a.name < b.name end)
+    elseif mode == "pct" then
+        table.sort(groups, function(a, b)
+            local pa = a.tot > 0 and a.att / a.tot or -1
+            local pb = b.tot > 0 and b.att / b.tot or -1
+            if pa ~= pb then return pa > pb end
+            return a.name < b.name
+        end)
+    elseif mode == "left" then
+        table.sort(groups, function(a, b)
+            local la, lb = a.tot - a.att, b.tot - b.att
+            if la ~= lb then return la > lb end
+            return a.name < b.name
+        end)
+    end
+    for _, group in ipairs(groups) do
+        for _, r in ipairs(group.rows) do AddRow(r) end
+    end
+    if #list == 0 then
+        AddRow({ text = "|cff888888No instances found|r" })
+    end
+end
+
+builders["zones"] = function(view)
+    local exp, mode = view.exp, view.mode
+    local zones = Engine.ZonesFor(exp, mode == "V", false)
+    if mode == "V" then zones = Engine.ZonesFor(exp, true) end
+
+    -- make sure zone data is being built in the background
+    local pendingCount = 0
+    for _, z in ipairs(zones) do
+        if not Engine.ZoneReady(z) then pendingCount = pendingCount + 1 end
+    end
+    if pendingCount > 0 then
+        Engine.Enqueue(function()
+            for _, z in ipairs(zones) do
+                Engine.ZoneData(z, true)
+            end
+        end, UI.RefreshIfShown, "zones" .. exp .. mode)
+    end
+
+    local sortMode = CurrentSort(view)
+    for _, z in ipairs(zones) do
+        if not Engine.ZoneReady(z) then
+            AddNodeRow(z.name, nil, { text = z.name, right = "|cff888888Scanning...|r" })
+        else
+            local zc = Engine.ZoneData(z)
+            if mode == "Q" and not z.city then
+                local st = Engine.Stats(zc.quest, "zq:" .. z.zone)
+                if st.total > 0 then
+                    AddNodeRow(z.name, st, {
+                        text = z.name,
+                        right = ANx.StatsString(st.attuned, st.total),
+                        onClick = function() UI.Push({ type = "quests", zoneEntry = z }) end,
+                    })
+                end
+            elseif mode == "W" and not z.city then
+                local st = Engine.StatsWithBest(zc.world, "zw:" .. z.zone, z.name, ANx.WORLD_DROP_SRC)
+                if st.total > 0 then
+                    AddNodeRow(z.name, st, {
+                        text = z.name,
+                        sub = BestLine(st.best),
+                        right = ANx.StatsString(st.attuned, st.total),
+                        onClick = function()
+                            UI.Push({ type = "items", title = z.name .. " - World Drops",
+                                items = zc.world, zoneName = z.name, srcFilter = ANx.WORLD_DROP_SRC })
+                        end,
+                    })
+                end
+            elseif mode == "V" then
+                local filter = ANx.db.vendorFilter or "all"
+                local ids = Engine.VendorItemsMatchingCategory(z, filter)
+                local st = Engine.Stats(ids, "zv:" .. z.zone .. ":" .. filter)
+                if st.total > 0 then
+                    AddNodeRow(z.name, st, {
+                        text = z.name .. (z.city and " |cffffd100(city)|r" or ""),
+                        right = ANx.StatsString(st.attuned, st.total),
+                        onClick = function() UI.Push({ type = "currencies", zoneEntry = z }) end,
+                    })
+                end
+            end
+        end
+    end
+    FlushNodeRows(sortMode)
+    if #displayRows == 0 then
+        AddRow({ text = "|cff888888Nothing found for this content type|r" })
+    end
+end
+
+builders["quests"] = function(view)
+    local z = view.zoneEntry
+    local zc = Engine.ZoneData(z)
+    local shown = 0
+    for _, q in ipairs(zc.questList) do
+      if ANx.NodeFactionAllowed("quest", q.id) then
+        local st = Engine.Stats(q.items, "q:" .. z.zone .. ":" .. q.id)
+        local left = st.total - st.attuned
+        if st.total > 0 and (left > 0 or ANx.db.showAttuned) then
+            shown = shown + 1
+            local hasArrow = ANx.QuestGivers and ANx.QuestGivers[q.id] ~= nil
+            local lock = ANx.GetQuestLockInfo and ANx.GetQuestLockInfo(q.id)
+            local prefix, hint = "", "click: waypoint arrow + rewards"
+            if lock == "locked" then
+                prefix = "|cffff8040[chain] |r"
+                hint = "click: arrow to next quest in the chain + rewards"
+            elseif lock == "inlog" then
+                prefix = "|cffffff00[in log] |r"
+            elseif lock == "completed" then
+                prefix = "|cff00ff00[done] |r"
+            end
+            AddNodeRow(q.name, st, {
+                text = prefix .. q.name .. (hasArrow and "  |cff33ff99>|r" or ""),
+                sub = #q.items .. " attunable reward(s)"
+                    .. (hasArrow and ("  |cff888888- " .. hint .. "|r") or ""),
+                right = ANx.StatsString(st.attuned, st.total),
+                onClick = function()
+                    ANx.SetQuestWaypoint(q.id, q.name)
+                    UI.Push({ type = "items", title = q.name, items = q.items,
+                        zoneName = z.name, srcFilter = nil })
+                end,
+            })
+        end
+      end
+    end
+    FlushNodeRows(CurrentSort(view))
+    if shown == 0 then
+        AddRow({ text = "|cff00ff00All quest items attuned in this zone!|r" })
+    end
+end
+
+builders["currencies"] = function(view)
+    local z = view.zoneEntry
+    local groups = Engine.CurrenciesForZone(z)
+    local filter = ANx.db.vendorFilter or "all"
+    local hidden = 0
+    for _, g in ipairs(groups) do
+        local cat = Engine.CurrencyCategory(g.name)
+        local visible = (filter == "all") or (cat == filter)
+        if not visible then
+            hidden = hidden + 1
+        else
+            local st = Engine.Stats(g.items, "cur:" .. z.zone .. ":" .. g.name)
+            if st.total > 0 then
+                AddNodeRow(g.name, st, {
+                    text = g.name,
+                    sub = g.name == ANx.UNKNOWN_CURRENCY
+                        and "Open these vendors once to record their prices" or nil,
+                    right = ANx.StatsString(st.attuned, st.total),
+                    onClick = function()
+                        UI.Push({ type = "vendors", zoneEntry = z, currency = g.name, items = g.items })
+                    end,
+                })
+            end
+        end
+    end
+    FlushNodeRows(CurrentSort(view))
+    if #displayRows == 0 then
+        if hidden > 0 then
+            AddRow({ text = "|cff888888No currencies match the filter (" .. hidden .. " hidden) - use the Filter button below|r" })
+        else
+            AddRow({ text = "|cff888888No vendor items found in " .. z.name .. "|r" })
+        end
+    end
+end
+
+builders["vendors"] = function(view)
+    local z = view.zoneEntry
+    local vendors = Engine.VendorsForItems(z, view.items)
+    for _, v in ipairs(vendors) do
+      if ANx.NodeFactionAllowed("vendor", v.id) then
+        local st = Engine.Stats(v.items, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency)
+        local hasLoc = ANx.HasVendorLoc and ANx.HasVendorLoc(v.id)
+        AddNodeRow(v.name, st, {
+            text = v.name .. (hasLoc and "  |cff33ff99>|r" or ""),
+            sub = z.name .. (hasLoc and "  |cff888888- click: waypoint arrow + items|r" or ""),
+            right = ANx.StatsString(st.attuned, st.total),
+            onClick = function()
+                if ANx.SetVendorWaypoint then ANx.SetVendorWaypoint(v.id, v.name) end
+                UI.Push({ type = "items", title = v.name .. " (" .. z.name .. ")",
+                    items = v.items, zoneName = z.name, srcFilter = nil, showCost = true })
+            end,
+        })
+      end
+    end
+    FlushNodeRows(CurrentSort(view))
+    if #vendors == 0 then
+        AddRow({ text = "|cff888888No specific vendor recorded - open the items list instead|r",
+            onClick = function()
+                UI.Push({ type = "items", title = view.currency .. " (" .. z.name .. ")",
+                    items = view.items, zoneName = z.name, srcFilter = nil, showCost = true })
+            end })
+    end
+end
+
+builders["profs"] = function(view)
+    local exp = view.exp
+    for _, prof in ipairs(ANx.ProfessionOrder or {}) do
+        local entries = Engine.ProfessionEntries(prof, exp)
+        local ids = {}
+        for _, e in ipairs(entries) do ids[#ids + 1] = e.id end
+        local st = Engine.Stats(ids, "prof:" .. prof .. ":" .. exp)
+        if st.total > 0 then
+            AddNodeRow(prof, st, {
+                text = prof,
+                right = ANx.StatsString(st.attuned, st.total),
+                onClick = function()
+                    UI.Push({ type = "items", title = prof .. " (" .. ANx.EXP_SHORT[exp] .. ")",
+                        items = ids, zoneName = nil, srcFilter = nil, craft = true,
+                        skillMap = entries })
+                end,
+            })
+        end
+    end
+    FlushNodeRows(CurrentSort(view))
+    if #displayRows == 0 then
+        AddRow({ text = "|cff888888No attunable crafted items for this expansion|r" })
+    end
+end
+
+builders["items"] = function(view)
+    local rows = Engine.ItemRows(view.items, view.zoneName, view.srcFilter, ANx.db.showAttuned)
+    local skillFor
+    if view.skillMap then
+        skillFor = {}
+        for _, e in ipairs(view.skillMap) do skillFor[e.id] = e.skill end
+    end
+    -- page sort (default "chance" order comes pre-sorted from the engine)
+    local sortMode = CurrentSort(view)
+    if sortMode == "name" then
+        table.sort(rows, function(a, b)
+            return (ANx.GetItemDisplay(a.id) or ""):lower() < (ANx.GetItemDisplay(b.id) or ""):lower()
+        end)
+    elseif sortMode == "progress" then
+        table.sort(rows, function(a, b)
+            local pa = a.attuned and 101 or a.progress
+            local pb = b.attuned and 101 or b.progress
+            if pa ~= pb then return pa > pb end
+            return a.chance > b.chance
+        end)
+    end
+    for _, r in ipairs(rows) do
+        local name, link, quality, tex = ANx.GetItemDisplay(r.id)
+        local rightText
+        if r.attuned then
+            rightText = "|cff00ff00Attuned|r"
+        elseif view.craft then
+            rightText = skillFor and skillFor[r.id] and ("|cffffd100Skill " .. skillFor[r.id] .. "|r") or ""
+        else
+            rightText = "|cff00ff88" .. ANx.FormatChance(r.chance) .. "|r"
+        end
+        local subParts = {}
+        if r.srcName then
+            subParts[#subParts + 1] = SrcTypeLabel(r.srcType) .. ": " .. r.srcName
+        end
+        if view.showCost then
+            local cost = ANx.CostString(r.id)
+            if cost then subParts[#subParts + 1] = "|cffffd100" .. cost .. "|r" end
+        end
+        local right2 = ""
+        if r.acct then right2 = "|cff00ccffaccount has variant|r"
+        elseif not r.attuned and r.progress > 0 then right2 = string.format("|cffaaaaaa%d%% progress|r", r.progress) end
+
+        AddRow({
+            text = QualityHex(quality or 1) .. name .. "|r",
+            sub = table.concat(subParts, "  "),
+            right = rightText,
+            right2 = right2,
+            icon = tex,
+            itemId = r.id,
+            onClick = function(selfBtn)
+                if IsShiftKeyDown() then
+                    local _, l = ANx.GetItemDisplay(r.id)
+                    if l then ChatEdit_InsertLink(l) end
+                else
+                    UI.Push({ type = "sources", itemId = r.id })
+                end
+            end,
+        })
+    end
+    if #rows == 0 then
+        AddRow({ text = "|cff00ff00Nothing left here - everything is attuned!|r" })
+    end
+end
+
+builders["sources"] = function(view)
+    local itemId = view.itemId
+    local name, link, quality, tex = ANx.GetItemDisplay(itemId)
+    local progress = ANx.Progress(itemId)
+    local headParts = {}
+    if progress >= 100 then headParts[#headParts + 1] = "|cff00ff00Attuned|r"
+    elseif progress > 0 then headParts[#headParts + 1] = progress .. "% progress"
+    else headParts[#headParts + 1] = "|cffff8040Not attuned|r" end
+    if ANx.AccountHasVariant(itemId) and progress < 100 then
+        headParts[#headParts + 1] = "|cff00ccffaccount has a variant|r"
+    end
+    local cost = ANx.CostString(itemId)
+    if cost then headParts[#headParts + 1] = cost end
+
+    AddRow({
+        text = QualityHex(quality or 1) .. name .. "|r",
+        sub = table.concat(headParts, "  -  "),
+        icon = tex,
+        itemId = itemId,
+        onClick = function()
+            if IsShiftKeyDown() then
+                local _, l = ANx.GetItemDisplay(itemId)
+                if l then ChatEdit_InsertLink(l) end
+            end
+        end,
+    })
+
+    local sources = Engine.Sources(itemId)
+    local sorted = {}
+    for _, s in ipairs(sources) do sorted[#sorted + 1] = s end
+    table.sort(sorted, function(a, b) return a.chance > b.chance end)
+    for _, s in ipairs(sorted) do
+        AddRow({
+            text = s.objName,
+            sub = SrcTypeLabel(s.srcType) .. (s.zoneName ~= "" and ("  -  " .. s.zoneName) or ""),
+            right = "|cff00ff88" .. ANx.FormatChance(s.chance) .. "|r",
+        })
+    end
+    if #sorted == 0 then
+        AddRow({ text = "|cff888888No source data (loot DB not loaded?)|r" })
+    end
+end
+
+-- ---------------------------------------------------------------------
+-- Breadcrumb titles
+-- ---------------------------------------------------------------------
+local function ViewTitle(view)
+    local t = view.type
+    if t == "home" then return "Select Expansion"
+    elseif t == "content" then return ANx.EXP_NAMES[view.exp] .. "  -  Select Content"
+    elseif t == "instances" then
+        return ANx.EXP_SHORT[view.exp] .. "  -  " .. (view.kind == "D" and "Which Dungeon?" or "Which Raid?")
+    elseif t == "zones" then
+        local m = view.mode
+        return ANx.EXP_SHORT[view.exp] .. "  -  " ..
+            (m == "Q" and "Quests: Which Zone?" or m == "W" and "World Drops: Which Zone?" or "Vendors: Which Zone?")
+    elseif t == "quests" then return view.zoneEntry.name .. "  -  Quests with attunables"
+    elseif t == "currencies" then return view.zoneEntry.name .. "  -  Which Currency?"
+    elseif t == "vendors" then return view.zoneEntry.name .. "  -  " .. view.currency .. "  -  Vendors"
+    elseif t == "profs" then return ANx.EXP_SHORT[view.exp] .. "  -  Which Profession?"
+    elseif t == "items" then return view.title or "Items"
+    elseif t == "sources" then return "Item Sources"
+    end
+    return ""
+end
+
+-- ---------------------------------------------------------------------
+-- Render
+-- ---------------------------------------------------------------------
+function UI.Render()
+    local f = UI.frame
+    if not f or not f:IsShown() then return end
+    local view = UI.Current()
+    if not view then return end
+
+    ResetRows()
+    local builder = builders[view.type]
+    if builder then builder(view) end
+
+    f.crumb:SetText("|cffffd100" .. ViewTitle(view) .. "|r")
+    f.back[#UI.stack > 1 and "Enable" or "Disable"](f.back)
+    f.showAttunedCb:SetChecked(ANx.db.showAttuned)
+
+    local isItemView = (view.type == "items" or view.type == "quests")
+    f.showAttunedCb[isItemView and "Show" or "Hide"](f.showAttunedCb)
+
+    -- scope + faction buttons: always available
+    f.scopeBtn:SetText(ANx.db.scope == "account" and "Attunes: |cff00ccffAccount|r" or "Attunes: Character")
+    local fac = ANx.db.faction or "both"
+    if fac == "A" then
+        f.factionBtn:SetText("Faction: |cff6699ffAlliance|r")
+    elseif fac == "H" then
+        f.factionBtn:SetText("Faction: |cffcc4444Horde|r")
+    else
+        f.factionBtn:SetText("Faction: Both")
+    end
+
+    -- sort button: only on sortable pages
+    if ViewSortModes(view) then
+        f.sortBtn:SetText("Sort: " .. (SORT_LABELS[CurrentSort(view)] or "?"))
+        f.sortBtn:Show()
+    else
+        f.sortBtn:Hide()
+    end
+
+    -- currency-type filter button: vendor zone list + currency pages
+    if ViewHasVendorFilter(view) then
+        f.filterBtn:SetText("Currency: " .. (VENDOR_FILTER_LABELS[ANx.db.vendorFilter or "all"] or "All"))
+        f.filterBtn:Show()
+    else
+        f.filterBtn:Hide()
+    end
+
+    if not ANx.LootDbLoaded() then
+        f.status:SetText("|cffff4040Loot DB not loaded - lists will be empty (see /an help)|r")
+    elseif Engine.scanning then
+        f.status:SetText("|cffffd100Scanning loot database...|r")
+    else
+        f.status:SetText("|cff888888Click rows to drill down - Shift-click items to link|r")
+    end
+
+    local total = #displayRows
+    FauxScrollFrame_Update(f.scroll, total, VISIBLE_ROWS, ROW_H)
+    local offset = FauxScrollFrame_GetOffset(f.scroll)
+
+    for i = 1, VISIBLE_ROWS do
+        local b = rowButtons[i]
+        local r = displayRows[i + offset]
+        if r then
+            b.text:SetText(r.text or "")
+            b.sub:SetText(r.sub or "")
+            b.right:SetText(r.right or "")
+            b.right2:SetText(r.right2 or "")
+            if r.icon then
+                b.icon:SetTexture(r.icon)
+                b.icon:Show()
+                b.text:SetPoint("TOPLEFT", 36, -3)
+                b.sub:SetPoint("BOTTOMLEFT", 36, 3)
+            else
+                b.icon:Hide()
+                b.text:SetPoint("TOPLEFT", 6, -3)
+                b.sub:SetPoint("BOTTOMLEFT", 6, 3)
+            end
+            if (r.sub or "") == "" then
+                b.text:SetPoint("TOPLEFT", r.icon and 36 or 6, -9)
+            end
+            b.onClick = r.onClick
+            b.tooltipItem = r.itemId
+            b.tooltipText = r.tooltipText
+            if r.onClick then b:Enable() else b:Disable() end
+            b:Show()
+        else
+            b:Hide()
+        end
+    end
+end
+
+-- ---------------------------------------------------------------------
+-- Show / toggle
+-- ---------------------------------------------------------------------
+function UI.Show(reset)
+    Engine = ANx.Engine
+    if not UI.frame then
+        UI.frame = CreateMainFrame()
+    end
+    if reset or #UI.stack == 0 then
+        UI.stack = { { type = "home" } }
+    end
+    UI.frame:Show()
+    UI.Render()
+end
+
+function UI.Toggle()
+    if UI.frame and UI.frame:IsShown() then
+        UI.frame:Hide()
+    else
+        UI.Show(false)
+    end
+end
