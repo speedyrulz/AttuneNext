@@ -263,6 +263,30 @@ function Engine.InstancesFor(exp, kind)
     return out
 end
 
+-- Does this item drop from a rare / rare-elite creature? (optionally in a
+-- specific zone). Used by the World Drops "Rares only" filter.
+function Engine.ItemHasRareSource(itemId, zoneName)
+    if not ANx.RareNPCs then return false end
+    for _, s in ipairs(Engine.Sources(itemId)) do
+        if (s.srcType == ANx.SRC.CREATURE or s.srcType == ANx.SRC.MYTHIC_CREATURE)
+            and s.objId and ANx.RareNPCs[s.objId] then
+            if not zoneName or ZoneNameMatch(s.zoneName, zoneName) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Filter an item list down to those with a rare source (in zoneName if given).
+function Engine.FilterRareItems(items, zoneName)
+    local out = {}
+    for _, id in ipairs(items) do
+        if Engine.ItemHasRareSource(id, zoneName) then out[#out + 1] = id end
+    end
+    return out
+end
+
 -- ---------------------------------------------------------------------
 -- Open world zones
 -- ---------------------------------------------------------------------

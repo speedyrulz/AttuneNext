@@ -92,6 +92,14 @@ local function ViewHasVendorFilter(view)
     return view.type == "currencies" or (view.type == "zones" and view.mode == "V")
 end
 
+-- true if the "rare spawns only" toggle applies to this view (World Drops)
+local function ViewIsWorldDrop(view)
+    if not view then return false end
+    if view.type == "zones" and view.mode == "W" then return true end
+    if view.type == "items" and view.worldDrop then return true end
+    return false
+end
+
 local function CycleVendorFilter()
     local cur = ANx.db.vendorFilter or "all"
     for i, f in ipairs(VENDOR_FILTERS) do
@@ -239,6 +247,19 @@ local function CreateMainFrame()
         UI.Render()
     end)
     f.filterBtn = filterBtn
+
+    -- world-drop "rares only" toggle (shares the currency button's slot;
+    -- the two never show on the same screen)
+    local raresBtn = CreateFrame("Button", "AttuneNextRaresBtn", f, "UIPanelButtonTemplate")
+    raresBtn:SetWidth(180); raresBtn:SetHeight(20)
+    raresBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    raresBtn:SetText("Rare spawns only: Off")
+    raresBtn:SetScript("OnClick", function()
+        ANx.db.raresOnly = not ANx.db.raresOnly
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.raresBtn = raresBtn
 
     -- ---------- search row ----------
     local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -615,15 +636,19 @@ builders["zones"] = function(view)
                     }, zloc)
                 end
             elseif mode == "W" and not z.city then
-                local st = Engine.StatsWithBest(zc.world, "zw:" .. z.zone, z.name, ANx.WORLD_DROP_SRC)
+                local rares = ANx.db.raresOnly
+                local worldItems = rares and Engine.FilterRareItems(zc.world, z.name) or zc.world
+                local st = Engine.StatsWithBest(worldItems, "zw:" .. z.zone .. (rares and ":R" or ":A"),
+                    z.name, ANx.WORLD_DROP_SRC)
                 if st.total > 0 then
                     AddNodeRow(z.name, st, {
-                        text = z.name,
+                        text = z.name .. (rares and "  |cffff8000(rares)|r" or ""),
                         sub = BestLine(st.best),
                         right = ANx.StatsString(st.attuned, st.total),
                         onClick = function()
                             UI.Push({ type = "items", title = z.name .. " - World Drops",
-                                items = zc.world, zoneName = z.name, srcFilter = ANx.WORLD_DROP_SRC })
+                                items = zc.world, zoneName = z.name, srcFilter = ANx.WORLD_DROP_SRC,
+                                worldDrop = true })
                         end,
                     }, zloc)
                 end
@@ -786,7 +811,11 @@ builders["profs"] = function(view)
 end
 
 builders["items"] = function(view)
-    local rows = Engine.ItemRows(view.items, view.zoneName, view.srcFilter, ANx.db.showAttuned)
+    local itemList = view.items
+    if view.worldDrop and ANx.db.raresOnly then
+        itemList = Engine.FilterRareItems(view.items, view.zoneName)
+    end
+    local rows = Engine.ItemRows(itemList, view.zoneName, view.srcFilter, ANx.db.showAttuned)
     local skillFor
     if view.skillMap then
         skillFor = {}
@@ -854,7 +883,11 @@ builders["items"] = function(view)
         })
     end
     if #rows == 0 then
-        AddRow({ text = "|cff00ff00Nothing left here - everything is attuned!|r" })
+        if view.worldDrop and ANx.db.raresOnly then
+            AddRow({ text = "|cff888888No rare-spawn world drops left here (toggle 'Rare spawns only' off to see all)|r" })
+        else
+            AddRow({ text = "|cff00ff00Nothing left here - everything is attuned!|r" })
+        end
     end
 end
 
@@ -1044,6 +1077,14 @@ function UI.Render()
         f.filterBtn:Show()
     else
         f.filterBtn:Hide()
+    end
+
+    -- rare-spawns-only toggle: world-drop screens (shares the currency slot)
+    if ViewIsWorldDrop(view) then
+        f.raresBtn:SetText(ANx.db.raresOnly and "Rare spawns only: |cffff8000On|r" or "Rare spawns only: Off")
+        f.raresBtn:Show()
+    else
+        f.raresBtn:Hide()
     end
 
     if not ANx.LootDbLoaded() then

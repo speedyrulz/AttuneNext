@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "1.8.0"
+ANx.VERSION = "1.9.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -72,6 +72,7 @@ local defaults = {
     vendorFilter = "all", -- currency category filter on vendor pages
     scope = "char",       -- "char" (current character) or "account"
     faction = "both",     -- "both", "A" (Alliance), or "H" (Horde)
+    raresOnly = false,    -- World Drops: only items that drop from rare spawns
 }
 
 local function ApplyDefaults(db, def)

@@ -35,7 +35,7 @@ Each row shows how many items you've attuned, how many are left, and the percent
 | **Dungeons** | Every dungeon. TBC/WotLK dungeons split into Normal / Heroic / Mythic, each counted separately. |
 | **Raids** | Every raid. WotLK raids split into 10/25 (and 10N/25N/10H/25H where the raid has them). |
 | **Quests** | Zones that have quests giving gear you still need. |
-| **Zone World Drops** | Open-world zones where gear drops off mobs/chests. |
+| **Zone World Drops** | Open-world zones where gear drops off mobs/chests. A **Rare spawns only** toggle here limits the list to gear that drops from rare / rare-elite spawns. |
 | **Vendors** | Zones and cities with vendors, grouped by the currency they charge. |
 | **Crafting** | Professions with gear you can craft. |
 
@@ -66,6 +66,7 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 - **Faction: Both / Alliance / Horde** — hide content locked to the other faction. Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
 - **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left → **Distance** (on item lists: Drop % → Name → Progress → Distance). *Distance* puts things in or near your current zone first (same zone, then same continent, then the rest), so it surfaces what you can go do right now. Your choice is remembered per screen.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
+- **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
 
 The **Show attuned items** checkbox (bottom right, on item lists) also lists things you've already finished, if you want to review them.
 
@@ -114,6 +115,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v1.9.0**
+- Added a **Rare spawns only** toggle on the World Drops screens that limits the list to gear dropping from rare / rare-elite spawns (505 rare NPCs, from the Questie 3.3.5 data). Zone counts respect it and active zones are tagged `(rares)`.
 
 **v1.8.0**
 - Added a **Search** box (on every screen) to find any attunable item by name; clicking a result opens its full detail page (sources, drop rates, progress, cost).
