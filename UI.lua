@@ -33,11 +33,13 @@ local CONTENT_DEFS = {
 -- ---------------------------------------------------------------------
 -- Sorting configuration
 -- ---------------------------------------------------------------------
-local NODE_SORTS = { "default", "name", "pct", "left" }
-local ITEM_SORTS = { "chance", "name", "progress" }
+local NODE_SORTS = { "default", "name", "pct", "left", "distance" }
+local ITEM_SORTS = { "chance", "name", "progress", "distance" }
+local SEARCH_SORTS = { "name", "distance" }
 local SORT_LABELS = {
     default = "Default", name = "Name", pct = "Attuned %",
     left = "Attunes Left", chance = "Drop %", progress = "Progress",
+    distance = "Distance",
 }
 local SORTABLE_NODE_VIEWS = {
     instances = true, zones = true, quests = true,
@@ -47,6 +49,7 @@ local SORTABLE_NODE_VIEWS = {
 local function ViewSortModes(view)
     if not view then return nil end
     if view.type == "items" then return ITEM_SORTS end
+    if view.type == "search" then return SEARCH_SORTS end
     if SORTABLE_NODE_VIEWS[view.type] then return NODE_SORTS end
     return nil
 end
@@ -136,7 +139,7 @@ local function CreateMainFrame()
     Engine = ANx.Engine
     local f = CreateFrame("Frame", "AttuneNextFrame", UIParent)
     f:SetWidth(FRAME_W)
-    f:SetHeight(ROW_H * VISIBLE_ROWS + 122)
+    f:SetHeight(ROW_H * VISIBLE_ROWS + 146)
     f:SetPoint("CENTER", 0, 40)
     f:SetFrameStrata("HIGH")
     f:EnableMouse(true)
@@ -237,9 +240,44 @@ local function CreateMainFrame()
     end)
     f.filterBtn = filterBtn
 
+    -- ---------- search row ----------
+    local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    searchLabel:SetPoint("TOPLEFT", 20, -86)
+    searchLabel:SetText("Search:")
+
+    local searchBox = CreateFrame("EditBox", "AttuneNextSearchBox", f, "InputBoxTemplate")
+    searchBox:SetWidth(300); searchBox:SetHeight(18)
+    searchBox:SetPoint("TOPLEFT", 74, -82)
+    searchBox:SetAutoFocus(false)
+    searchBox:SetScript("OnEscapePressed", function(self)
+        self:SetText(""); self:ClearFocus()
+    end)
+    searchBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    searchBox:SetScript("OnTextChanged", function(self)
+        if UI._searchSetting then return end
+        local txt = self:GetText() or ""
+        UI.searchQuery = txt
+        local cur = UI.Current()
+        if txt ~= "" then
+            if not cur or cur.type ~= "search" then
+                UI.Push({ type = "search" })
+            else
+                UI.Render()
+            end
+        else
+            if cur and cur.type == "search" then UI.Pop() else UI.Render() end
+        end
+    end)
+    f.searchBox = searchBox
+
+    local searchHint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    searchHint:SetPoint("LEFT", searchBox, "RIGHT", 10, 0)
+    searchHint:SetText("find any attunable item by name")
+    f.searchHint = searchHint
+
     -- scroll area
     local scroll = CreateFrame("ScrollFrame", "AttuneNextScroll", f, "FauxScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -82)
+    scroll:SetPoint("TOPLEFT", 16, -106)
     scroll:SetPoint("BOTTOMRIGHT", -36, 38)
     scroll:SetScript("OnVerticalScroll", function(self, offset)
         FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.Render)
@@ -251,7 +289,7 @@ local function CreateMainFrame()
         local b = CreateFrame("Button", "AttuneNextRow" .. i, f)
         b:SetWidth(FRAME_W - 56)
         b:SetHeight(ROW_H)
-        b:SetPoint("TOPLEFT", 20, -82 - (i - 1) * ROW_H)
+        b:SetPoint("TOPLEFT", 20, -106 - (i - 1) * ROW_H)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
 
         b.icon = b:CreateTexture(nil, "ARTWORK")
@@ -336,7 +374,7 @@ end
 -- applies the page's sort mode (name asc / attuned% desc / left desc).
 local nodeRows = {}
 
-local function AddNodeRow(sortName, st, rowDesc)
+local function AddNodeRow(sortName, st, rowDesc, loc)
     rowDesc._sName = (sortName or ""):lower()
     if st and st.total and st.total > 0 then
         rowDesc._sPct = st.attuned / st.total
@@ -344,6 +382,7 @@ local function AddNodeRow(sortName, st, rowDesc)
     else
         rowDesc._sPct, rowDesc._sLeft = -1, -1
     end
+    rowDesc._loc = loc
     nodeRows[#nodeRows + 1] = rowDesc
 end
 
@@ -358,6 +397,12 @@ local function FlushNodeRows(mode)
     elseif mode == "left" then
         table.sort(nodeRows, function(a, b)
             if a._sLeft ~= b._sLeft then return a._sLeft > b._sLeft end
+            return a._sName < b._sName
+        end)
+    elseif mode == "distance" then
+        for _, r in ipairs(nodeRows) do r._sDist = ANx.DistanceRank(r._loc) end
+        table.sort(nodeRows, function(a, b)
+            if a._sDist ~= b._sDist then return a._sDist < b._sDist end
             return a._sName < b._sName
         end)
     end
@@ -510,7 +555,8 @@ builders["instances"] = function(view)
         end
         groups[#groups + 1] = group
     end
-    if mode == "name" then
+    if mode == "name" or mode == "distance" then
+        -- instances have no world coordinates; Distance falls back to name order
         table.sort(groups, function(a, b) return a.name < b.name end)
     elseif mode == "pct" then
         table.sort(groups, function(a, b)
@@ -558,6 +604,7 @@ builders["zones"] = function(view)
             AddNodeRow(z.name, nil, { text = z.name, right = "|cff888888Scanning...|r" })
         else
             local zc = Engine.ZoneData(z)
+            local zloc = { zoneName = z.name }
             if mode == "Q" and not z.city then
                 local st = Engine.Stats(zc.quest, "zq:" .. z.zone)
                 if st.total > 0 then
@@ -565,7 +612,7 @@ builders["zones"] = function(view)
                         text = z.name,
                         right = ANx.StatsString(st.attuned, st.total),
                         onClick = function() UI.Push({ type = "quests", zoneEntry = z }) end,
-                    })
+                    }, zloc)
                 end
             elseif mode == "W" and not z.city then
                 local st = Engine.StatsWithBest(zc.world, "zw:" .. z.zone, z.name, ANx.WORLD_DROP_SRC)
@@ -578,7 +625,7 @@ builders["zones"] = function(view)
                             UI.Push({ type = "items", title = z.name .. " - World Drops",
                                 items = zc.world, zoneName = z.name, srcFilter = ANx.WORLD_DROP_SRC })
                         end,
-                    })
+                    }, zloc)
                 end
             elseif mode == "V" then
                 local filter = ANx.db.vendorFilter or "all"
@@ -589,7 +636,7 @@ builders["zones"] = function(view)
                         text = z.name .. (z.city and " |cffffd100(city)|r" or ""),
                         right = ANx.StatsString(st.attuned, st.total),
                         onClick = function() UI.Push({ type = "currencies", zoneEntry = z }) end,
-                    })
+                    }, zloc)
                 end
             end
         end
@@ -621,6 +668,10 @@ builders["quests"] = function(view)
             elseif lock == "completed" then
                 prefix = "|cff00ff00[done] |r"
             end
+            local qloc = { zoneName = z.name }
+            local ge = ANx.QuestGivers and ANx.QuestGivers[q.id]
+            if ge then qloc = { zoneName = ANx.QuestZoneNames and ANx.QuestZoneNames[ge[1]] or z.name,
+                x = ge[2] / 10, y = ge[3] / 10 } end
             AddNodeRow(q.name, st, {
                 text = prefix .. q.name .. (hasArrow and "  |cff33ff99>|r" or ""),
                 sub = #q.items .. " attunable reward(s)"
@@ -631,7 +682,7 @@ builders["quests"] = function(view)
                     UI.Push({ type = "items", title = q.name, items = q.items,
                         zoneName = z.name, srcFilter = nil })
                 end,
-            })
+            }, qloc)
         end
       end
     end
@@ -662,7 +713,7 @@ builders["currencies"] = function(view)
                     onClick = function()
                         UI.Push({ type = "vendors", zoneEntry = z, currency = g.name, items = g.items })
                     end,
-                })
+                }, { zoneName = z.name })
             end
         end
     end
@@ -683,6 +734,10 @@ builders["vendors"] = function(view)
       if ANx.NodeFactionAllowed("vendor", v.id) then
         local st = Engine.Stats(v.items, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency)
         local hasLoc = ANx.HasVendorLoc and ANx.HasVendorLoc(v.id)
+        local vloc = { zoneName = z.name }
+        local vle = v.id and ANx.VendorLocs and ANx.VendorLocs[v.id]
+        if vle then vloc = { zoneName = ANx.VendorZoneNames and ANx.VendorZoneNames[vle[1]] or z.name,
+            x = vle[2] / 10, y = vle[3] / 10 } end
         AddNodeRow(v.name, st, {
             text = v.name .. (hasLoc and "  |cff33ff99>|r" or ""),
             sub = z.name .. (hasLoc and "  |cff888888- click: waypoint arrow + items|r" or ""),
@@ -692,7 +747,7 @@ builders["vendors"] = function(view)
                 UI.Push({ type = "items", title = v.name .. " (" .. z.name .. ")",
                     items = v.items, zoneName = z.name, srcFilter = nil, showCost = true })
             end,
-        })
+        }, vloc)
       end
     end
     FlushNodeRows(CurrentSort(view))
@@ -748,6 +803,14 @@ builders["items"] = function(view)
             local pa = a.attuned and 101 or a.progress
             local pb = b.attuned and 101 or b.progress
             if pa ~= pb then return pa > pb end
+            return a.chance > b.chance
+        end)
+    elseif sortMode == "distance" then
+        for _, r in ipairs(rows) do
+            r._sDist = ANx.DistanceRank(r.srcZone and { zoneName = r.srcZone } or nil)
+        end
+        table.sort(rows, function(a, b)
+            if a._sDist ~= b._sDist then return a._sDist < b._sDist end
             return a.chance > b.chance
         end)
     end
@@ -838,6 +901,80 @@ builders["sources"] = function(view)
     end
 end
 
+builders["search"] = function(view)
+    local q = (UI.searchQuery or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if #q < 2 then
+        AddRow({ text = "|cff888888Type at least 2 letters to search for an item...|r" })
+        return
+    end
+
+    local universe, ready = Engine.Universe()
+    if not ready then
+        for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
+    end
+
+    local matches = {}
+    for _, id in ipairs(universe) do
+        local name = ANx.GetItemDisplay(id)
+        if name and name:lower():find(q, 1, true) then
+            matches[#matches + 1] = { id = id, name = name }
+        end
+    end
+
+    local mode = CurrentSort(view)
+    if mode == "distance" then
+        for _, m in ipairs(matches) do
+            local _, _, _, _, zone = Engine.BestSource(m.id)
+            m._d = ANx.DistanceRank(zone and zone ~= "" and { zoneName = zone } or nil)
+        end
+        table.sort(matches, function(a, b)
+            if a._d ~= b._d then return a._d < b._d end
+            return a.name:lower() < b.name:lower()
+        end)
+    else
+        table.sort(matches, function(a, b) return a.name:lower() < b.name:lower() end)
+    end
+
+    local CAP = 60
+    local shown = 0
+    for _, m in ipairs(matches) do
+        if shown >= CAP then break end
+        shown = shown + 1
+        local name, _, quality, tex = ANx.GetItemDisplay(m.id)
+        local chance, srcName, srcType, _, zone = Engine.BestSource(m.id)
+        local attuned = ANx.CountAttuned(m.id)
+        local canC = ANx.CanCount(m.id)
+        local rightText
+        if attuned then rightText = "|cff00ff00Attuned|r"
+        elseif chance and chance > 0 then rightText = "|cff00ff88" .. ANx.FormatChance(chance) .. "|r"
+        else rightText = "" end
+        local subParts = {}
+        if srcName then
+            subParts[#subParts + 1] = SrcTypeLabel(srcType) .. ": " .. srcName
+                .. (zone and zone ~= "" and (" (" .. zone .. ")") or "")
+        end
+        if not canC then subParts[#subParts + 1] = "|cffff6060other faction/class|r" end
+        AddRow({
+            text = QualityHex(quality or 1) .. name .. "|r",
+            sub = table.concat(subParts, "  "),
+            right = rightText,
+            icon = tex,
+            itemId = m.id,
+            onClick = function() UI.Push({ type = "sources", itemId = m.id }) end,
+        })
+    end
+
+    if shown == 0 then
+        if not ready then
+            AddRow({ text = "|cff888888Indexing items in the background - try again in a moment...|r" })
+        else
+            AddRow({ text = "|cff888888No attunable items match \"" .. q .. "\"|r" })
+        end
+    elseif #matches > CAP then
+        AddRow({ text = "|cff888888...and " .. (#matches - CAP) .. " more - type more letters to narrow it down|r" })
+    end
+end
+
 -- ---------------------------------------------------------------------
 -- Breadcrumb titles
 -- ---------------------------------------------------------------------
@@ -857,6 +994,7 @@ local function ViewTitle(view)
     elseif t == "profs" then return ANx.EXP_SHORT[view.exp] .. "  -  Which Profession?"
     elseif t == "items" then return view.title or "Items"
     elseif t == "sources" then return "Item Sources"
+    elseif t == "search" then return "Search results for \"" .. (UI.searchQuery or "") .. "\""
     end
     return ""
 end
@@ -962,6 +1100,12 @@ function UI.Show(reset)
     end
     if reset or #UI.stack == 0 then
         UI.stack = { { type = "home" } }
+        UI.searchQuery = ""
+        if UI.frame.searchBox then
+            UI._searchSetting = true
+            UI.frame.searchBox:SetText("")
+            UI._searchSetting = false
+        end
     end
     UI.frame:Show()
     UI.Render()

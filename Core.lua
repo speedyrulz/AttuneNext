@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "1.7.0"
+ANx.VERSION = "1.8.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -274,6 +274,44 @@ function ANx.IsAttunableAtAll(itemId)
         return r ~= nil and r ~= 0 and r ~= false
     end
     return false
+end
+
+-- Player's current world position: continent index, zone index, x, y (0..1).
+-- Continent/zone indices match GetMapContinents()/GetMapZones() ordering.
+function ANx.PlayerLoc()
+    if SetMapToCurrentZone then pcall(SetMapToCurrentZone) end
+    local c = GetCurrentMapContinent and GetCurrentMapContinent() or nil
+    local z = GetCurrentMapZone and GetCurrentMapZone() or nil
+    local x, y = 0, 0
+    if GetPlayerMapPosition then
+        local ok, mx, my = pcall(GetPlayerMapPosition, "player")
+        if ok and mx then x, y = mx, my end
+    end
+    if type(c) ~= "number" or c < 1 then c = nil end
+    if type(z) ~= "number" or z < 1 then z = nil end
+    return c, z, x, y
+end
+
+-- Distance rank for sorting (lower = closer). loc = { zoneName=, x=, y= } (x,y in 0..100)
+-- Same zone with coords -> real planar distance; same zone -> ~150; same continent
+-- -> ~10000; other continent -> ~100000; unknown location -> huge.
+function ANx.DistanceRank(loc)
+    if not loc or not loc.zoneName then return 1e9 end
+    if not ANx.ZoneToContinentZone then return 1e8 end
+    local c, z = ANx.ZoneToContinentZone(loc.zoneName)  -- must be a plain call (multi-return)
+    if not c then return 1e8 end
+    local pc, pz, px, py = ANx.PlayerLoc()
+    if pc and c == pc then
+        if pz and z == pz then
+            if loc.x and loc.y and (px > 0 or py > 0) then
+                local dx, dy = px * 100 - loc.x, py * 100 - loc.y
+                return math.sqrt(dx * dx + dy * dy)   -- ~0..140
+            end
+            return 150
+        end
+        return 10000 + (z or 0)
+    end
+    return 100000 + c * 1000 + (z or 0)
 end
 
 -- Build ItemLoc zone id for an instance map + difficulty.

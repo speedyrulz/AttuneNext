@@ -171,6 +171,11 @@ local function FindCZByZoneName(zoneName)
     return nil
 end
 
+-- Public wrapper used by the Distance sort.
+function ANx.ZoneToContinentZone(zoneName)
+    return FindCZByZoneName(zoneName)
+end
+
 -- ---------------------------------------------------------------------
 -- Waypoint dispatch
 -- ---------------------------------------------------------------------

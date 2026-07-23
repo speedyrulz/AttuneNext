@@ -25,8 +25,35 @@ end
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
+    Engine.universeCache = nil
     Engine.scanJobs = {}
     Engine.scanning = false
+end
+
+-- Full attunable item universe for search: union of every instance/zone/
+-- profession/vendor-cost item id the addon knows about. Requires the
+-- background summaries to be built (returns partial + nil-cached until ready).
+function Engine.Universe()
+    if Engine.universeCache then return Engine.universeCache, true end
+    local set = {}
+    local allReady = true
+    for exp = 1, 3 do
+        local s = summaryCache[exp]
+        if s and s.ready then
+            for _, cat in ipairs({ "D", "R", "Q", "W", "V", "C" }) do
+                for id in pairs(s[cat]) do set[id] = true end
+            end
+        else
+            allReady = false
+        end
+    end
+    if ANx.VendorCosts then
+        for id in pairs(ANx.VendorCosts) do set[id] = true end
+    end
+    local arr = {}
+    for id in pairs(set) do arr[#arr + 1] = id end
+    if allReady then Engine.universeCache = arr end
+    return arr, allReady
 end
 
 -- ---------------------------------------------------------------------
@@ -174,7 +201,7 @@ local function ZoneNameMatch(a, b)
 end
 
 -- Best source for an item, preferring sources in the given zone name + src filter.
--- Returns chance, sourceName, srcType, restricted(bool)
+-- Returns chance, sourceName, srcType, restricted(bool), zoneName
 function Engine.BestSource(itemId, zoneName, srcFilter)
     local best, bestAny
     for _, s in ipairs(Engine.Sources(itemId)) do
@@ -186,8 +213,8 @@ function Engine.BestSource(itemId, zoneName, srcFilter)
             end
         end
     end
-    if best then return best.chance, best.objName, best.srcType, true end
-    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false end
+    if best then return best.chance, best.objName, best.srcType, true, best.zoneName end
+    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName end
     return nil
 end
 
@@ -390,10 +417,10 @@ function Engine.ItemRows(itemIds, zoneName, srcFilter, includeAttuned)
             seen[id] = true
             local isAtt = ANx.CountAttuned(id)
             if includeAttuned or not isAtt then
-                local chance, srcName, srcType = Engine.BestSource(id, zoneName, srcFilter)
+                local chance, srcName, srcType, _, srcZone = Engine.BestSource(id, zoneName, srcFilter)
                 rows[#rows + 1] = {
                     id = id, chance = chance or 0, srcName = srcName,
-                    srcType = srcType, attuned = isAtt,
+                    srcType = srcType, attuned = isAtt, srcZone = srcZone,
                     acct = (not isAtt) and ANx.AccountHasVariant(id) or false,
                     progress = ANx.Progress(id),
                 }

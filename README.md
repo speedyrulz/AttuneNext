@@ -47,6 +47,10 @@ The final screen is always a list of the actual items left, **sorted by drop rat
 - **Shift-click** it to link it in chat.
 - **Hover** for the normal item tooltip.
 
+### Searching for a specific item
+
+There's a **Search** box under the toolbar, available on every screen. Type part of an item's name and AttuneNext lists every attunable item that matches, with its best source right on the row. Click a result to jump straight to its detail page — where it drops (every source and drop rate), its attune progress, and its vendor cost if it has one. Clear the box to go back to where you were.
+
 ### Waypoint arrows
 
 - On a **quest** screen, clicking a quest points an arrow at its quest giver. If you can't pick the quest up yet, the arrow points at the **next quest in the chain** you *can* do, and chat tells you what unlocks what.
@@ -60,7 +64,7 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 
 - **Attunes: Character / Account** — switch between *what this character can attune* (the default) and *your whole account*. Character scope respects your class, armor type, and level; account scope counts an item as done if **any** of your characters has attuned any version of it.
 - **Faction: Both / Alliance / Horde** — hide content locked to the other faction. Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
-- **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left (on item lists: Drop % → Name → Progress). Your choice is remembered per screen.
+- **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left → **Distance** (on item lists: Drop % → Name → Progress → Distance). *Distance* puts things in or near your current zone first (same zone, then same continent, then the rest), so it surfaces what you can go do right now. Your choice is remembered per screen.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 
 The **Show attuned items** checkbox (bottom right, on item lists) also lists things you've already finished, if you want to review them.
@@ -110,6 +114,10 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v1.8.0**
+- Added a **Search** box (on every screen) to find any attunable item by name; clicking a result opens its full detail page (sources, drop rates, progress, cost).
+- Added a **Distance** option to the Sort button that orders lists by how close things are to your current position (current zone → current continent → elsewhere).
 
 **v1.7.0**
 - Added **Attunes: Character / Account** toggle. Character scope (default) counts what the current character can attune and marks items done at 100% progress; Account scope counts every attunable item and marks it done if any character attuned any variant.
