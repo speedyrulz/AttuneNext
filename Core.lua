@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "1.9.0"
+ANx.VERSION = "2.2.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -67,12 +67,15 @@ local defaults = {
     merchant = {},        -- [itemId] = { { name=..., count=... }, ... } scanned costs (account-wide)
     scale = 1.0,
     minimapAngle = 220,
-    showAttuned = false,  -- also list already-attuned items in item lists
     sort = {},            -- [viewType] = sort mode
     vendorFilter = "all", -- currency category filter on vendor pages
     scope = "char",       -- "char" (current character) or "account"
     faction = "both",     -- "both", "A" (Alliance), or "H" (Horde)
     raresOnly = false,    -- World Drops: only items that drop from rare spawns
+    zoneExclusive = false,-- global: only count/show items found in a single zone
+    forge = 0,            -- forge target (0..4): "Left" = items at this tier or below
+    stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
+    stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
 }
 
 local function ApplyDefaults(db, def)
@@ -244,6 +247,45 @@ function ANx.CountAttuned(itemId)
         return ANx.AccountHasVariant(itemId)
     end
     return ANx.IsAttuned(itemId)
+end
+
+-- Forge tiers: 0 Unattuned, 1 Attuned (base), 2 Titanforged, 3 Warforged, 4 Lightforged
+ANx.FORGE_TIERS  = { "unattuned", "attuned", "tf", "wf", "lf" }
+ANx.FORGE_LABELS = {
+    [0] = "Unattuned", [1] = "Attuned", [2] = "Titanforged",
+    [3] = "Warforged", [4] = "Lightforged",
+}
+ANx.FORGE_SHORT  = { [1] = "Attuned", [2] = "TF", [3] = "WF", [4] = "LF" }
+
+-- Current attunement/forge tier of an item (0..4), scope-aware.
+-- forge level from GetItemAttuneForge is account-wide (1=TF, 2=WF, 3=LF).
+function ANx.CurrentTier(itemId)
+    local forge = (_G.GetItemAttuneForge and _G.GetItemAttuneForge(itemId)) or 0
+    if forge and forge >= 1 then
+        if forge >= 3 then return 4 end
+        if forge == 2 then return 3 end
+        return 2
+    end
+    if ANx.CountAttuned(itemId) then return 1 end
+    return 0
+end
+
+-- The forge filter is a TARGET tier. An item is still "left" (needs work) if
+-- its current tier is at or below the target; it's "done" once it's past it.
+--   target Unattuned(0): left = unattuned only          (default; = "what's left")
+--   target Warforged(3): left = everything not Lightforged
+--   target Lightforged(4): left = everything
+function ANx.ForgeAllowed(itemId)   -- visible in item lists (= still "left")
+    return ANx.CurrentTier(itemId) <= (ANx.db and ANx.db.forge or 0)
+end
+
+function ANx.CountDone(itemId)      -- counts toward "attuned"/done in the stats
+    return ANx.CurrentTier(itemId) > (ANx.db and ANx.db.forge or 0)
+end
+
+-- Legacy "show attuned items" flag now derives from the forge threshold.
+function ANx.ShowAttunedItems()
+    return (ANx.db and ANx.db.forge or 0) >= 1
 end
 
 -- Item-level faction gate. Neutral items always pass.

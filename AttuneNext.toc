@@ -2,7 +2,7 @@
 ## Title: AttuneNext
 ## Notes: Recommends the next items to attune on Synastria. Browse by expansion, content type, dungeon/raid difficulty, zone, vendor currency or profession. /an
 ## Author: Jeff (built with Claude)
-## Version: 1.9.0
+## Version: 2.2.0
 ## SavedVariables: AttuneNextDB
 
 Core.lua
@@ -12,6 +12,7 @@ Data_Professions.lua
 Data_QuestGivers.lua
 Data_VendorCosts.lua
 Data_VendorLocs.lua
+Data_VendorStock.lua
 Data_Faction.lua
 Data_RareNPCs.lua
 Engine.lua

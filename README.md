@@ -36,6 +36,8 @@ Each row shows how many items you've attuned, how many are left, and the percent
 | **Raids** | Every raid. WotLK raids split into 10/25 (and 10N/25N/10H/25H where the raid has them). |
 | **Quests** | Zones that have quests giving gear you still need. |
 | **Zone World Drops** | Open-world zones where gear drops off mobs/chests. A **Rare spawns only** toggle here limits the list to gear that drops from rare / rare-elite spawns. |
+
+Item lists across all of these also respond to the **Show** (forge tier) and **Zone-exclusive only** buttons described under "The toolbar" below.
 | **Vendors** | Zones and cities with vendors, grouped by the currency they charge. |
 | **Crafting** | Professions with gear you can craft. |
 
@@ -65,8 +67,11 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 - **Attunes: Character / Account** — switch between *what this character can attune* (the default) and *your whole account*. Character scope respects your class, armor type, and level; account scope counts an item as done if **any** of your characters has attuned any version of it.
 - **Faction: Both / Alliance / Horde** — hide content locked to the other faction. Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
 - **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left → **Distance** (on item lists: Drop % → Name → Progress → Distance). *Distance* puts things in or near your current zone first (same zone, then same continent, then the rest), so it surfaces what you can go do right now. Your choice is remembered per screen.
+- **Show** (forge target) — sets a forge target and everything follows it. Pick a tier and an item counts as "left" until it's pushed **past** that tier; the **Left** number on every screen updates to match. *Unattuned* (default) = only truly unattuned items are left; *Warforged* = everything that isn't Lightforged yet is left; *Lightforged* = everything is left (nothing is beyond it). Item lists show exactly those "left" items, with forged ones tagged TF / WF / LF. (This replaces the old "Show attuned items" checkbox.)
+- **Zone-exclusive only** — a global toggle. When On, every level only counts and shows items that drop **nowhere but a single zone** — so you can see, right from the dungeon/zone list, how many exclusive items each place still has without clicking in. Great for prioritising a lockout.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 - **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
+- **Stock** — on every vendor screen (the zone list, currency list, vendor list, and item list). Filters to All / Limited / Unlimited so you can find the limited-stock items (the ones that sell a few at a time and restock on a timer) or ignore them — counts update at each level. On a specific vendor it uses that vendor's exact stock; on the broader lists it flags an item as limited if any vendor sells it that way.
 
 The **Show attuned items** checkbox (bottom right, on item lists) also lists things you've already finished, if you want to review them.
 
@@ -77,6 +82,8 @@ The **Show attuned items** checkbox (bottom right, on item lists) also lists thi
 Prices for about 5,400 vendor items are **built in**, so currencies and costs show up immediately — you don't have to physically find each vendor first. An item you can buy several ways is listed under each currency, and costs show every option (e.g. *"50 Emblem of Triumph or 340g"*).
 
 AttuneNext also quietly records prices from any vendor you actually open, and those live prices win over the built-in data — that keeps Synastria's custom vendors and any price changes accurate.
+
+Vendor item rows and item detail pages also show **stock**: most vendors sell in unlimited supply, but some sell a limited number (e.g. "1 at a time") that restock on a timer — those are highlighted so you know to come back. Stock comes from the built-in data and is updated from any vendor you open.
 
 ---
 
@@ -115,6 +122,20 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.2.0**
+- The **Stock** filter now works on every vendor screen (zone list, currency list, vendor list, and item list), not just a single vendor's items — counts update at each level.
+
+**v2.1.0**
+- The **Show** (forge) filter is now a proper target: the **Left** count on every screen updates to match it (e.g. with Warforged selected, Left = everything not yet Lightforged), instead of only filtering the item list.
+- **Zone-exclusive only** is now a global toggle that updates the counts on every level, so you can see each zone's exclusive-item count from the list without clicking in.
+- Added a **Stock** filter on vendor item lists (All / Limited / Unlimited).
+
+**v2.0.0**
+- Added a **Show** (forge-tier) filter that sets which attunement/forge tiers appear in item lists — Unattuned / Attuned / Titanforged / Warforged / Lightforged, as a "this tier or below" threshold. Forged items are tagged TF / WF / LF. This replaces the old "Show attuned items" checkbox.
+- Added a **Zone-exclusive only** toggle on item lists that shows only items obtainable nowhere but the current zone/instance.
+- Vendor rows and item pages now show **stock** (unlimited vs. limited "N at a time"), from built-in TrinityCore data plus live vendor scans.
+- Reorganized the controls into two toolbar rows and widened the window to fit.
 
 **v1.9.0**
 - Added a **Rare spawns only** toggle on the World Drops screens that limits the list to gear dropping from rare / rare-elite spawns (505 rare NPCs, from the Questie 3.3.5 data). Zone counts respect it and active zones are tagged `(rares)`.

@@ -25,7 +25,9 @@ function ANx.ScanMerchant()
         local link = GetMerchantItemLink(i)
         local itemId = link and tonumber(link:match("item:(%d+)"))
         if itemId then
-            local _, _, price, _, _, _, extendedCost = GetMerchantItemInfo(i)
+            -- 3.3.5: name, texture, price, quantity, numAvailable, isUsable, extendedCost
+            local _, _, price, _, numAvailable, _, extendedCost = GetMerchantItemInfo(i)
+            if numAvailable ~= nil then ANx.db.stock[itemId] = numAvailable end
             local costs = {}
             if price and price > 0 then
                 costs[#costs + 1] = { name = "Gold", count = price } -- copper
@@ -79,6 +81,24 @@ local function OneCostString(costs)
         end
     end
     return table.concat(parts, " + ")
+end
+
+-- Stock for an item at a given vendor (npcId optional).
+-- Returns: label string, isLimited(bool)
+--   static per-vendor limit (xlsx) wins; else last live merchant numAvailable;
+--   else assumed unlimited.
+function ANx.StockString(itemId, npcId)
+    if npcId and ANx.VendorStock and ANx.VendorStock[npcId] then
+        local c = ANx.VendorStock[npcId][itemId]
+        if c then
+            return (c == 1) and "1 at a time" or (c .. " at a time"), true
+        end
+    end
+    local live = ANx.db and ANx.db.stock and ANx.db.stock[itemId]
+    if live ~= nil and live >= 0 then
+        return (live == 1) and "1 at a time" or (live .. " in stock"), true
+    end
+    return "unlimited", false
 end
 
 -- All known purchase options for an item, e.g. "50 Emblem of Triumph or 340g"

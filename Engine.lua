@@ -14,6 +14,8 @@ local instDiffCache = {}   -- ["map:diff"]    -> { itemIds }
 local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
 local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
 local srcCache      = {}   -- [itemId]        -> sources array
+local zexCache      = {}   -- [itemId]        -> bool: drops in exactly one zone
+local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
 local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
 local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
@@ -25,6 +27,8 @@ end
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
+    zexCache = {}
+    limitedItemsSet = nil
     Engine.universeCache = nil
     Engine.scanJobs = {}
     Engine.scanning = false
@@ -287,6 +291,58 @@ function Engine.FilterRareItems(items, zoneName)
     return out
 end
 
+-- Is this item obtainable ONLY from the given zone (no source anywhere else)?
+-- Considers named zones only; empty/Unknown source zones are ignored.
+function Engine.ItemIsUniqueToZone(itemId, zoneName)
+    if not zoneName then return true end
+    local inThisZone = false
+    for _, s in ipairs(Engine.Sources(itemId)) do
+        local zn = s.zoneName
+        if zn and zn ~= "" and zn ~= "Unknown" and zn ~= "?" then
+            if ZoneNameMatch(zn, zoneName) then
+                inThisZone = true
+            else
+                return false   -- found a source in a different zone
+            end
+        end
+    end
+    return inThisZone
+end
+
+function Engine.FilterZoneExclusive(items, zoneName)
+    local out = {}
+    for _, id in ipairs(items) do
+        if Engine.ItemIsUniqueToZone(id, zoneName) then out[#out + 1] = id end
+    end
+    return out
+end
+
+-- Global zone-exclusivity: does the item drop in exactly ONE named zone?
+-- (For an item in a node's set this is equivalent to "unique to this node".)
+function Engine.IsZoneExclusive(itemId)
+    local c = zexCache[itemId]
+    if c ~= nil then return c end
+    local zone, multiple = nil, false
+    for _, s in ipairs(Engine.Sources(itemId)) do
+        local zn = s.zoneName
+        if zn and zn ~= "" and zn ~= "Unknown" and zn ~= "?" then
+            if zone == nil then zone = zn:lower()
+            elseif zone ~= zn:lower() then multiple = true break end
+        end
+    end
+    c = (zone ~= nil) and (not multiple)
+    zexCache[itemId] = c
+    return c
+end
+
+-- Shared item eligibility for counting/listing: character/account can attune it,
+-- faction filter passes, and (if the global toggle is on) it's zone-exclusive.
+function Engine.Eligible(itemId)
+    if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
+    if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
+    return true
+end
+
 -- ---------------------------------------------------------------------
 -- Open world zones
 -- ---------------------------------------------------------------------
@@ -396,9 +452,9 @@ function Engine.Stats(itemIds, key)
     if key and statsCache[key] then return statsCache[key] end
     local attuned, total = 0, 0
     for _, id in ipairs(itemIds) do
-        if ANx.CanCount(id) and ANx.FactionAllowed(id) then
+        if Engine.Eligible(id) then
             total = total + 1
-            if ANx.CountAttuned(id) then attuned = attuned + 1 end
+            if ANx.CountDone(id) then attuned = attuned + 1 end
         end
     end
     local r = { attuned = attuned, total = total }
@@ -414,9 +470,9 @@ function Engine.StatsWithBest(itemIds, key, zoneName, srcFilter)
     local attuned, total = 0, 0
     local best
     for _, id in ipairs(itemIds) do
-        if ANx.CanCount(id) and ANx.FactionAllowed(id) then
+        if Engine.Eligible(id) then
             total = total + 1
-            if ANx.CountAttuned(id) then
+            if ANx.CountDone(id) then
                 attuned = attuned + 1
             else
                 local chance, srcName = Engine.BestSource(id, zoneName, srcFilter)
@@ -432,19 +488,21 @@ function Engine.StatsWithBest(itemIds, key, zoneName, srcFilter)
 end
 
 -- Detailed remaining-item rows for the item list screens, sorted by chance desc.
--- Returns { {id, chance, srcName, srcType, attuned, acct}, ... }
-function Engine.ItemRows(itemIds, zoneName, srcFilter, includeAttuned)
+-- Visibility is governed by the forge-tier threshold (ANx.db.forge).
+-- Returns { {id, chance, srcName, srcType, attuned, tier, acct, progress, srcZone}, ... }
+function Engine.ItemRows(itemIds, zoneName, srcFilter)
     local rows = {}
     local seen = {}
     for _, id in ipairs(itemIds) do
-        if not seen[id] and ANx.CanCount(id) and ANx.FactionAllowed(id) then
+        if not seen[id] and Engine.Eligible(id) then
             seen[id] = true
-            local isAtt = ANx.CountAttuned(id)
-            if includeAttuned or not isAtt then
+            if ANx.ForgeAllowed(id) then
+                local isAtt = ANx.CountAttuned(id)
                 local chance, srcName, srcType, _, srcZone = Engine.BestSource(id, zoneName, srcFilter)
                 rows[#rows + 1] = {
                     id = id, chance = chance or 0, srcName = srcName,
                     srcType = srcType, attuned = isAtt, srcZone = srcZone,
+                    tier = ANx.CurrentTier(id),
                     acct = (not isAtt) and ANx.AccountHasVariant(id) or false,
                     progress = ANx.Progress(id),
                 }
@@ -463,6 +521,49 @@ end
 -- ---------------------------------------------------------------------
 local UNKNOWN_CURRENCY = "Unknown (visit vendor to scan)"
 ANx.UNKNOWN_CURRENCY = UNKNOWN_CURRENCY
+
+-- ---------------------------------------------------------------------
+-- Vendor stock filtering (all / limited / unlimited)
+-- ---------------------------------------------------------------------
+-- Item ids that sell with limited stock at *some* vendor (static data), cached.
+local function LimitedItems()
+    if not limitedItemsSet then
+        limitedItemsSet = {}
+        if ANx.VendorStock then
+            for _, items in pairs(ANx.VendorStock) do
+                for itemId in pairs(items) do limitedItemsSet[itemId] = true end
+            end
+        end
+    end
+    return limitedItemsSet
+end
+
+-- Is this item limited-stock? Exact for a known vendor, else "limited anywhere".
+function Engine.ItemIsLimited(itemId, vendorId)
+    if vendorId then
+        local _, limited = ANx.StockString(itemId, vendorId)
+        return limited == true
+    end
+    if LimitedItems()[itemId] then return true end
+    local live = ANx.db and ANx.db.stock and ANx.db.stock[itemId]
+    return live ~= nil and live >= 0
+end
+
+function Engine.StockMatches(itemId, filter, vendorId)
+    filter = filter or "all"
+    if filter == "all" then return true end
+    local limited = Engine.ItemIsLimited(itemId, vendorId)
+    return (filter == "limited") == limited
+end
+
+function Engine.FilterByStock(items, filter, vendorId)
+    if not filter or filter == "all" then return items end
+    local out = {}
+    for _, id in ipairs(items) do
+        if Engine.StockMatches(id, filter, vendorId) then out[#out + 1] = id end
+    end
+    return out
+end
 
 -- Static costs from Data_VendorCosts.lua, decoded to { {name=,count=}, ... } variants
 local function StaticCosts(itemId)
@@ -676,9 +777,9 @@ function Engine.SetStats(set, key)
     if key and statsCache[key] then return statsCache[key] end
     local attuned, total = 0, 0
     for id in pairs(set) do
-        if type(id) == "number" and ANx.CanCount(id) and ANx.FactionAllowed(id) then
+        if type(id) == "number" and Engine.Eligible(id) then
             total = total + 1
-            if ANx.CountAttuned(id) then attuned = attuned + 1 end
+            if ANx.CountDone(id) then attuned = attuned + 1 end
         end
     end
     local r = { attuned = attuned, total = total }

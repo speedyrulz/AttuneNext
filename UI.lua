@@ -12,7 +12,7 @@ ANx.UI = UI
 
 local ROW_H = 34
 local VISIBLE_ROWS = 13
-local FRAME_W = 660
+local FRAME_W = 720
 
 local DIFF_LABELS = {
     [""] = "Browse", ["N"] = "Normal", ["H"] = "Heroic", ["M"] = "Mythic",
@@ -100,6 +100,15 @@ local function ViewIsWorldDrop(view)
     return false
 end
 
+-- true if the vendor stock filter applies to this view (any vendor screen)
+local function ViewHasStockFilter(view)
+    if not view then return false end
+    if view.type == "currencies" or view.type == "vendors" then return true end
+    if view.type == "zones" and view.mode == "V" then return true end
+    if view.type == "items" and view.showCost then return true end
+    return false
+end
+
 local function CycleVendorFilter()
     local cur = ANx.db.vendorFilter or "all"
     for i, f in ipairs(VENDOR_FILTERS) do
@@ -147,7 +156,7 @@ local function CreateMainFrame()
     Engine = ANx.Engine
     local f = CreateFrame("Frame", "AttuneNextFrame", UIParent)
     f:SetWidth(FRAME_W)
-    f:SetHeight(ROW_H * VISIBLE_ROWS + 146)
+    f:SetHeight(ROW_H * VISIBLE_ROWS + 170)
     f:SetPoint("CENTER", 0, 40)
     f:SetFrameStrata("HIGH")
     f:EnableMouse(true)
@@ -228,7 +237,7 @@ local function CreateMainFrame()
 
     -- sort cycle button
     local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
-    sortBtn:SetWidth(150); sortBtn:SetHeight(20)
+    sortBtn:SetWidth(146); sortBtn:SetHeight(20)
     sortBtn:SetPoint("LEFT", factionBtn, "RIGHT", 6, 0)
     sortBtn:SetText("Sort: Default")
     sortBtn:SetScript("OnClick", function()
@@ -237,10 +246,35 @@ local function CreateMainFrame()
     end)
     f.sortBtn = sortBtn
 
-    -- vendor currency filter cycle button
+    -- forge-tier visibility filter
+    local forgeBtn = CreateFrame("Button", "AttuneNextForgeBtn", f, "UIPanelButtonTemplate")
+    forgeBtn:SetWidth(180); forgeBtn:SetHeight(20)
+    forgeBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    forgeBtn:SetText("Show: Unattuned")
+    forgeBtn:SetScript("OnClick", function()
+        ANx.db.forge = ((ANx.db.forge or 0) + 1) % 5
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.forgeBtn = forgeBtn
+
+    -- ---------- toolbar row B ----------
+    -- zone-exclusive toggle (global: affects counts on every level)
+    local zexBtn = CreateFrame("Button", "AttuneNextZexBtn", f, "UIPanelButtonTemplate")
+    zexBtn:SetWidth(210); zexBtn:SetHeight(20)
+    zexBtn:SetPoint("TOPLEFT", 16, -80)
+    zexBtn:SetText("Zone-exclusive only: Off")
+    zexBtn:SetScript("OnClick", function()
+        ANx.db.zoneExclusive = not ANx.db.zoneExclusive
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.zexBtn = zexBtn
+
+    -- vendor currency filter cycle button (context: vendor zone/currency screens)
     local filterBtn = CreateFrame("Button", "AttuneNextFilterBtn", f, "UIPanelButtonTemplate")
-    filterBtn:SetWidth(180); filterBtn:SetHeight(20)
-    filterBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    filterBtn:SetWidth(200); filterBtn:SetHeight(20)
+    filterBtn:SetPoint("LEFT", zexBtn, "RIGHT", 6, 0)
     filterBtn:SetText("Currency: All")
     filterBtn:SetScript("OnClick", function()
         CycleVendorFilter()
@@ -248,11 +282,10 @@ local function CreateMainFrame()
     end)
     f.filterBtn = filterBtn
 
-    -- world-drop "rares only" toggle (shares the currency button's slot;
-    -- the two never show on the same screen)
+    -- world-drop "rares only" toggle (shares the context slot)
     local raresBtn = CreateFrame("Button", "AttuneNextRaresBtn", f, "UIPanelButtonTemplate")
-    raresBtn:SetWidth(180); raresBtn:SetHeight(20)
-    raresBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    raresBtn:SetWidth(200); raresBtn:SetHeight(20)
+    raresBtn:SetPoint("LEFT", zexBtn, "RIGHT", 6, 0)
     raresBtn:SetText("Rare spawns only: Off")
     raresBtn:SetScript("OnClick", function()
         ANx.db.raresOnly = not ANx.db.raresOnly
@@ -261,14 +294,27 @@ local function CreateMainFrame()
     end)
     f.raresBtn = raresBtn
 
+    -- vendor stock filter (its own slot; applies on every vendor screen)
+    local stockBtn = CreateFrame("Button", "AttuneNextStockBtn", f, "UIPanelButtonTemplate")
+    stockBtn:SetWidth(200); stockBtn:SetHeight(20)
+    stockBtn:SetPoint("LEFT", filterBtn, "RIGHT", 6, 0)
+    stockBtn:SetText("Stock: All")
+    stockBtn:SetScript("OnClick", function()
+        local cur = ANx.db.stockFilter or "all"
+        ANx.db.stockFilter = (cur == "all") and "limited" or (cur == "limited") and "unlimited" or "all"
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.stockBtn = stockBtn
+
     -- ---------- search row ----------
     local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    searchLabel:SetPoint("TOPLEFT", 20, -86)
+    searchLabel:SetPoint("TOPLEFT", 20, -110)
     searchLabel:SetText("Search:")
 
     local searchBox = CreateFrame("EditBox", "AttuneNextSearchBox", f, "InputBoxTemplate")
     searchBox:SetWidth(300); searchBox:SetHeight(18)
-    searchBox:SetPoint("TOPLEFT", 74, -82)
+    searchBox:SetPoint("TOPLEFT", 74, -106)
     searchBox:SetAutoFocus(false)
     searchBox:SetScript("OnEscapePressed", function(self)
         self:SetText(""); self:ClearFocus()
@@ -298,7 +344,7 @@ local function CreateMainFrame()
 
     -- scroll area
     local scroll = CreateFrame("ScrollFrame", "AttuneNextScroll", f, "FauxScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -106)
+    scroll:SetPoint("TOPLEFT", 16, -130)
     scroll:SetPoint("BOTTOMRIGHT", -36, 38)
     scroll:SetScript("OnVerticalScroll", function(self, offset)
         FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.Render)
@@ -310,7 +356,7 @@ local function CreateMainFrame()
         local b = CreateFrame("Button", "AttuneNextRow" .. i, f)
         b:SetWidth(FRAME_W - 56)
         b:SetHeight(ROW_H)
-        b:SetPoint("TOPLEFT", 20, -106 - (i - 1) * ROW_H)
+        b:SetPoint("TOPLEFT", 20, -130 - (i - 1) * ROW_H)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
 
         b.icon = b:CreateTexture(nil, "ARTWORK")
@@ -357,21 +403,12 @@ local function CreateMainFrame()
         rowButtons[i] = b
     end
 
-    -- footer: status + show-attuned checkbox
+    -- footer: status text (attuned-visibility now lives on the Show: forge button)
     local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     status:SetPoint("BOTTOMLEFT", 18, 20)
+    status:SetWidth(FRAME_W - 40)
     status:SetJustifyH("LEFT")
     f.status = status
-
-    local cb = CreateFrame("CheckButton", "AttuneNextShowAttuned", f, "UICheckButtonTemplate")
-    cb:SetWidth(22); cb:SetHeight(22)
-    cb:SetPoint("BOTTOMRIGHT", -150, 14)
-    _G[cb:GetName() .. "Text"]:SetText("Show attuned items")
-    cb:SetScript("OnClick", function(self)
-        ANx.db.showAttuned = self:GetChecked() and true or false
-        UI.Render()
-    end)
-    f.showAttunedCb = cb
 
     tinsert(UISpecialFrames, "AttuneNextFrame")
     f:Hide()
@@ -655,7 +692,8 @@ builders["zones"] = function(view)
             elseif mode == "V" then
                 local filter = ANx.db.vendorFilter or "all"
                 local ids = Engine.VendorItemsMatchingCategory(z, filter)
-                local st = Engine.Stats(ids, "zv:" .. z.zone .. ":" .. filter)
+                ids = Engine.FilterByStock(ids, ANx.db.stockFilter, nil)
+                local st = Engine.Stats(ids, "zv:" .. z.zone .. ":" .. filter .. ":" .. (ANx.db.stockFilter or "all"))
                 if st.total > 0 then
                     AddNodeRow(z.name, st, {
                         text = z.name .. (z.city and " |cffffd100(city)|r" or ""),
@@ -680,7 +718,7 @@ builders["quests"] = function(view)
       if ANx.NodeFactionAllowed("quest", q.id) then
         local st = Engine.Stats(q.items, "q:" .. z.zone .. ":" .. q.id)
         local left = st.total - st.attuned
-        if st.total > 0 and (left > 0 or ANx.db.showAttuned) then
+        if st.total > 0 and (left > 0 or ANx.ShowAttunedItems()) then
             shown = shown + 1
             local hasArrow = ANx.QuestGivers and ANx.QuestGivers[q.id] ~= nil
             local lock = ANx.GetQuestLockInfo and ANx.GetQuestLockInfo(q.id)
@@ -728,7 +766,8 @@ builders["currencies"] = function(view)
         if not visible then
             hidden = hidden + 1
         else
-            local st = Engine.Stats(g.items, "cur:" .. z.zone .. ":" .. g.name)
+            local gitems = Engine.FilterByStock(g.items, ANx.db.stockFilter, nil)
+            local st = Engine.Stats(gitems, "cur:" .. z.zone .. ":" .. g.name .. ":" .. (ANx.db.stockFilter or "all"))
             if st.total > 0 then
                 AddNodeRow(g.name, st, {
                     text = g.name,
@@ -756,8 +795,9 @@ builders["vendors"] = function(view)
     local z = view.zoneEntry
     local vendors = Engine.VendorsForItems(z, view.items)
     for _, v in ipairs(vendors) do
-      if ANx.NodeFactionAllowed("vendor", v.id) then
-        local st = Engine.Stats(v.items, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency)
+      local vitems = Engine.FilterByStock(v.items, ANx.db.stockFilter, v.id)
+      if ANx.NodeFactionAllowed("vendor", v.id) and #vitems > 0 then
+        local st = Engine.Stats(vitems, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency .. ":" .. (ANx.db.stockFilter or "all"))
         local hasLoc = ANx.HasVendorLoc and ANx.HasVendorLoc(v.id)
         local vloc = { zoneName = z.name }
         local vle = v.id and ANx.VendorLocs and ANx.VendorLocs[v.id]
@@ -770,7 +810,8 @@ builders["vendors"] = function(view)
             onClick = function()
                 if ANx.SetVendorWaypoint then ANx.SetVendorWaypoint(v.id, v.name) end
                 UI.Push({ type = "items", title = v.name .. " (" .. z.name .. ")",
-                    items = v.items, zoneName = z.name, srcFilter = nil, showCost = true })
+                    items = v.items, zoneName = z.name, srcFilter = nil, showCost = true,
+                    vendorId = v.id })
             end,
         }, vloc)
       end
@@ -813,9 +854,14 @@ end
 builders["items"] = function(view)
     local itemList = view.items
     if view.worldDrop and ANx.db.raresOnly then
-        itemList = Engine.FilterRareItems(view.items, view.zoneName)
+        itemList = Engine.FilterRareItems(itemList, view.zoneName)
     end
-    local rows = Engine.ItemRows(itemList, view.zoneName, view.srcFilter, ANx.db.showAttuned)
+    -- zone-exclusive is applied globally inside Engine.Eligible / ItemRows.
+    -- vendor stock filter (limited / unlimited) on vendor item lists:
+    if view.showCost then
+        itemList = Engine.FilterByStock(itemList, ANx.db.stockFilter, view.vendorId)
+    end
+    local rows = Engine.ItemRows(itemList, view.zoneName, view.srcFilter)
     local skillFor
     if view.skillMap then
         skillFor = {}
@@ -846,7 +892,9 @@ builders["items"] = function(view)
     for _, r in ipairs(rows) do
         local name, link, quality, tex = ANx.GetItemDisplay(r.id)
         local rightText
-        if r.attuned then
+        if r.tier and r.tier >= 2 then
+            rightText = "|cffff8000" .. (ANx.FORGE_SHORT[r.tier] or "") .. "|r"   -- TF / WF / LF
+        elseif r.attuned then
             rightText = "|cff00ff00Attuned|r"
         elseif view.craft then
             rightText = skillFor and skillFor[r.id] and ("|cffffd100Skill " .. skillFor[r.id] .. "|r") or ""
@@ -860,6 +908,11 @@ builders["items"] = function(view)
         if view.showCost then
             local cost = ANx.CostString(r.id)
             if cost then subParts[#subParts + 1] = "|cffffd100" .. cost .. "|r" end
+            if ANx.StockString then
+                local stockText, limited = ANx.StockString(r.id, view.vendorId)
+                subParts[#subParts + 1] = (limited and "|cffff8000Stock: " or "|cff888888Stock: ")
+                    .. stockText .. "|r"
+            end
         end
         local right2 = ""
         if r.acct then right2 = "|cff00ccffaccount has variant|r"
@@ -883,10 +936,16 @@ builders["items"] = function(view)
         })
     end
     if #rows == 0 then
-        if view.worldDrop and ANx.db.raresOnly then
+        if view.showCost and (ANx.db.stockFilter or "all") ~= "all" then
+            AddRow({ text = "|cff888888No " .. ANx.db.stockFilter .. "-stock items here (change the Stock filter)|r" })
+        elseif ANx.db.zoneExclusive then
+            AddRow({ text = "|cff888888Nothing zone-exclusive left here (toggle 'Zone-exclusive only' off to see all)|r" })
+        elseif view.worldDrop and ANx.db.raresOnly then
             AddRow({ text = "|cff888888No rare-spawn world drops left here (toggle 'Rare spawns only' off to see all)|r" })
-        else
+        elseif (ANx.db.forge or 0) == 0 then
             AddRow({ text = "|cff00ff00Nothing left here - everything is attuned!|r" })
+        else
+            AddRow({ text = "|cff00ff00Everything here is past the '" .. (ANx.FORGE_LABELS[ANx.db.forge] or "") .. "' target!|r" })
         end
     end
 end
@@ -923,10 +982,22 @@ builders["sources"] = function(view)
     for _, s in ipairs(sources) do sorted[#sorted + 1] = s end
     table.sort(sorted, function(a, b) return a.chance > b.chance end)
     for _, s in ipairs(sorted) do
+        local subText = SrcTypeLabel(s.srcType) .. (s.zoneName ~= "" and ("  -  " .. s.zoneName) or "")
+        local rightText = "|cff00ff88" .. ANx.FormatChance(s.chance) .. "|r"
+        if s.srcType == ANx.SRC.VENDOR then
+            -- vendors: show price + stock instead of a drop chance
+            local cost2 = ANx.CostString(itemId)
+            local stockText, limited = ANx.StockString and ANx.StockString(itemId, s.objId)
+            if stockText then
+                subText = subText .. (limited and "  -  |cffff8000Stock: " or "  -  |cff888888Stock: ")
+                    .. stockText .. "|r"
+            end
+            rightText = cost2 and ("|cffffd100" .. cost2 .. "|r") or "|cff888888vendor|r"
+        end
         AddRow({
             text = s.objName,
-            sub = SrcTypeLabel(s.srcType) .. (s.zoneName ~= "" and ("  -  " .. s.zoneName) or ""),
-            right = "|cff00ff88" .. ANx.FormatChance(s.chance) .. "|r",
+            sub = subText,
+            right = rightText,
         })
     end
     if #sorted == 0 then
@@ -1047,10 +1118,6 @@ function UI.Render()
 
     f.crumb:SetText("|cffffd100" .. ViewTitle(view) .. "|r")
     f.back[#UI.stack > 1 and "Enable" or "Disable"](f.back)
-    f.showAttunedCb:SetChecked(ANx.db.showAttuned)
-
-    local isItemView = (view.type == "items" or view.type == "quests")
-    f.showAttunedCb[isItemView and "Show" or "Hide"](f.showAttunedCb)
 
     -- scope + faction buttons: always available
     f.scopeBtn:SetText(ANx.db.scope == "account" and "Attunes: |cff00ccffAccount|r" or "Attunes: Character")
@@ -1063,6 +1130,11 @@ function UI.Render()
         f.factionBtn:SetText("Faction: Both")
     end
 
+    -- forge-tier visibility: always available
+    local forgeTier = ANx.db.forge or 0
+    local forgeCol = (forgeTier >= 2) and "|cffff8000" or (forgeTier == 1) and "|cff00ff00" or ""
+    f.forgeBtn:SetText("Show: " .. forgeCol .. (ANx.FORGE_LABELS[forgeTier] or "?") .. (forgeCol ~= "" and "|r" or ""))
+
     -- sort button: only on sortable pages
     if ViewSortModes(view) then
         f.sortBtn:SetText("Sort: " .. (SORT_LABELS[CurrentSort(view)] or "?"))
@@ -1071,20 +1143,30 @@ function UI.Render()
         f.sortBtn:Hide()
     end
 
-    -- currency-type filter button: vendor zone list + currency pages
+    -- zone-exclusive toggle: global (affects counts on every level)
+    f.zexBtn:SetText(ANx.db.zoneExclusive and "Zone-exclusive only: |cffffd100On|r" or "Zone-exclusive only: Off")
+
+    -- row B context slot (right of zone-exclusive): currency filter / rares toggle.
     if ViewHasVendorFilter(view) then
         f.filterBtn:SetText("Currency: " .. (VENDOR_FILTER_LABELS[ANx.db.vendorFilter or "all"] or "All"))
         f.filterBtn:Show()
     else
         f.filterBtn:Hide()
     end
-
-    -- rare-spawns-only toggle: world-drop screens (shares the currency slot)
     if ViewIsWorldDrop(view) then
         f.raresBtn:SetText(ANx.db.raresOnly and "Rare spawns only: |cffff8000On|r" or "Rare spawns only: Off")
         f.raresBtn:Show()
     else
         f.raresBtn:Hide()
+    end
+    -- stock filter (its own slot): on every vendor screen
+    if ViewHasStockFilter(view) then
+        local sf = ANx.db.stockFilter or "all"
+        local sfLabel = (sf == "limited") and "|cffff8000Limited|r" or (sf == "unlimited") and "Unlimited" or "All"
+        f.stockBtn:SetText("Stock: " .. sfLabel)
+        f.stockBtn:Show()
+    else
+        f.stockBtn:Hide()
     end
 
     if not ANx.LootDbLoaded() then
@@ -1092,7 +1174,7 @@ function UI.Render()
     elseif Engine.scanning then
         f.status:SetText("|cffffd100Scanning loot database...|r")
     else
-        f.status:SetText("|cff888888Click rows to drill down - Shift-click items to link|r")
+        f.status:SetText("|cff888888'Show' sets the forge target - Left counts items at that tier or below. Zone-exclusive affects every level.|r")
     end
 
     local total = #displayRows
