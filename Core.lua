@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.2.0"
+ANx.VERSION = "2.3.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -67,6 +67,7 @@ local defaults = {
     merchant = {},        -- [itemId] = { { name=..., count=... }, ... } scanned costs (account-wide)
     scale = 1.0,
     minimapAngle = 220,
+    minimapShow = true,
     sort = {},            -- [viewType] = sort mode
     vendorFilter = "all", -- currency category filter on vendor pages
     scope = "char",       -- "char" (current character) or "account"
@@ -431,6 +432,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         _G.AttuneNextDB = _G.AttuneNextDB or {}
         ApplyDefaults(_G.AttuneNextDB, defaults)
         ANx.db = _G.AttuneNextDB
+        if ANx.InitSettings then ANx.InitSettings() end
 
         -- Chain into the Synastria custom-data event to catch attunement changes
         local prevHandler = _G.OnCustomGameData
@@ -509,8 +511,14 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.Engine then ANx.Engine.ForceRescan() end
         ANx.Print("caches cleared (including saved scan) - rescanning")
         if ANx.UI then ANx.UI.Show(true) end
+    elseif msg == "settings" or msg == "config" or msg == "options" then
+        if ANx.OpenSettings then ANx.OpenSettings() end
+    elseif msg == "minimap" then
+        ANx.db.minimapShow = not ANx.db.minimapShow
+        if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
+        ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an settings, /an minimap, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

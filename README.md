@@ -20,6 +20,8 @@ It works on the Synastria client only — it reads the server's built-in attunem
 
 ---
 
+There's also a **minimap button** (the book icon): **left-click** to open the planner, **right-click** for settings, and drag it around the minimap edge to reposition. A **settings panel** lives under Esc → Interface → AddOns → AttuneNext (or type `/an settings`) with window scale, a minimap-button toggle, debug logging, and Reset-filters / Rescan buttons.
+
 ## The basics
 
 Type **`/an`** to open or close the window. You'll see three expansions:
@@ -100,6 +102,8 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 | Command | What it does |
 |---|---|
 | `/an` or `/attunenext` | Open / close the window |
+| `/an settings` | Open the settings panel |
+| `/an minimap` | Show / hide the minimap button |
 | `/an src <itemId>` | Print every source + drop rate for an item (handy for reporting data issues) |
 | `/an scale <0.5–2.0>` | Resize the window |
 | `/an reset` | Full rescan — clears every cache including the saved scan |
@@ -122,6 +126,10 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.3.0**
+- Added a **settings panel** in the Interface Options AddOns list (also `/an settings`): window scale, minimap-button toggle, debug logging, and Reset-filters / Rescan buttons.
+- Added a **minimap button**: left-click to open, right-click for settings, draggable around the minimap. Toggle it with `/an minimap` or in settings.
 
 **v2.2.0**
 - The **Stock** filter now works on every vendor screen (zone list, currency list, vendor list, and item list), not just a single vendor's items — counts update at each level.
