@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.4.0"
+ANx.VERSION = "2.5.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -76,6 +76,7 @@ local defaults = {
     zoneExclusive = false,-- global: only count/show items found in a single zone
     forge = 0,            -- forge target (0..4): "Left" = items at this tier or below
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
+    affordableOnly = false,-- vendor screens: only items you can currently pay for
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
 }
 
@@ -320,6 +321,42 @@ function ANx.IsAttunableAtAll(itemId)
     return false
 end
 
+-- ---------------------------------------------------------------------
+-- Player currency (for the "affordable only" vendor filter)
+-- ---------------------------------------------------------------------
+local currencyMap, currencyMapAt = nil, 0
+
+function ANx.InvalidatePlayerCurrency()
+    currencyMap = nil
+end
+
+-- How much of a named currency the player has right now.
+-- Gold is returned in copper (matching the stored cost format).
+function ANx.PlayerCurrency(name)
+    if name == "Gold" then return GetMoney and GetMoney() or 0 end
+    if name == "Honor Points" then
+        return (GetHonorCurrency and GetHonorCurrency())
+            or (GetHonorPoints and GetHonorPoints()) or 0
+    end
+    if name == "Arena Points" then
+        return (GetArenaCurrency and GetArenaCurrency())
+            or (GetArenaPoints and GetArenaPoints()) or 0
+    end
+    -- token/emblem/mark currencies live in the currency panel; scan it (cached)
+    local now = GetTime and GetTime() or 0
+    if not currencyMap or (now - currencyMapAt) > 5 then
+        currencyMap = {}
+        if GetCurrencyListSize and GetCurrencyListInfo then
+            for i = 1, GetCurrencyListSize() do
+                local cname, isHeader, _, _, _, count = GetCurrencyListInfo(i)
+                if cname and not isHeader then currencyMap[cname] = count or 0 end
+            end
+        end
+        currencyMapAt = now
+    end
+    return currencyMap[name] or 0
+end
+
 -- Player's current world position: continent index, zone index, x, y (0..1).
 -- Continent/zone indices match GetMapContinents()/GetMapZones() ordering.
 function ANx.PlayerLoc()
@@ -401,6 +438,8 @@ eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("MERCHANT_SHOW")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
+eventFrame:RegisterEvent("PLAYER_MONEY")
+eventFrame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
 
 local initialized = false
 local function TryInit()
@@ -462,6 +501,12 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant) end
     elseif event == "PLAYER_LOGOUT" then
         if ANx.Engine then pcall(ANx.Engine.ExportCache) end
+    elseif event == "PLAYER_MONEY" or event == "CURRENCY_DISPLAY_UPDATE" then
+        ANx.InvalidatePlayerCurrency()
+        if ANx.db and ANx.db.affordableOnly then
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+        end
     end
 end)
 

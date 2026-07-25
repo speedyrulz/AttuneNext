@@ -613,6 +613,29 @@ function Engine.FilterByStock(items, filter, vendorId)
     return out
 end
 
+-- Can the player afford this item right now with any one of its cost variants?
+-- Items with no known cost are treated as affordable (not hidden).
+function Engine.CanAfford(itemId)
+    local all = Engine.ItemAllCosts(itemId)
+    if not all then return true end
+    for _, cost in ipairs(all) do
+        local ok = true
+        for _, c in ipairs(cost) do
+            if ANx.PlayerCurrency(c.name) < c.count then ok = false break end
+        end
+        if ok then return true end
+    end
+    return false
+end
+
+function Engine.FilterAffordable(items)
+    local out = {}
+    for _, id in ipairs(items) do
+        if Engine.CanAfford(id) then out[#out + 1] = id end
+    end
+    return out
+end
+
 -- Static costs from Data_VendorCosts.lua, decoded to { {name=,count=}, ... } variants
 local function StaticCosts(itemId)
     local raw = ANx.VendorCosts and ANx.VendorCosts[itemId]

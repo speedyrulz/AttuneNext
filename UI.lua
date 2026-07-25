@@ -12,7 +12,7 @@ ANx.UI = UI
 
 local ROW_H = 34
 local VISIBLE_ROWS = 13
-local FRAME_W = 720
+local FRAME_W = 760
 
 local DIFF_LABELS = {
     [""] = "Browse", ["N"] = "Normal", ["H"] = "Heroic", ["M"] = "Mythic",
@@ -82,8 +82,8 @@ end
 -- ---------------------------------------------------------------------
 local VENDOR_FILTERS = { "all", "gold", "points", "emblem", "token" }
 local VENDOR_FILTER_LABELS = {
-    all = "All Currencies", gold = "Gold", points = "Honor & Arena",
-    emblem = "Emblems & Marks", token = "Other Tokens",
+    all = "All", gold = "Gold", points = "Honor/Arena",
+    emblem = "Emblems", token = "Tokens",
 }
 
 -- true if the currency-type filter button applies to this view
@@ -261,9 +261,9 @@ local function CreateMainFrame()
     -- ---------- toolbar row B ----------
     -- zone-exclusive toggle (global: affects counts on every level)
     local zexBtn = CreateFrame("Button", "AttuneNextZexBtn", f, "UIPanelButtonTemplate")
-    zexBtn:SetWidth(210); zexBtn:SetHeight(20)
+    zexBtn:SetWidth(185); zexBtn:SetHeight(20)
     zexBtn:SetPoint("TOPLEFT", 16, -80)
-    zexBtn:SetText("Zone-exclusive only: Off")
+    zexBtn:SetText("Zone-exclusive: Off")
     zexBtn:SetScript("OnClick", function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
         Engine.InvalidateStats()
@@ -273,8 +273,8 @@ local function CreateMainFrame()
 
     -- vendor currency filter cycle button (context: vendor zone/currency screens)
     local filterBtn = CreateFrame("Button", "AttuneNextFilterBtn", f, "UIPanelButtonTemplate")
-    filterBtn:SetWidth(200); filterBtn:SetHeight(20)
-    filterBtn:SetPoint("LEFT", zexBtn, "RIGHT", 6, 0)
+    filterBtn:SetWidth(188); filterBtn:SetHeight(20)
+    filterBtn:SetPoint("TOPLEFT", 207, -80)
     filterBtn:SetText("Currency: All")
     filterBtn:SetScript("OnClick", function()
         CycleVendorFilter()
@@ -282,10 +282,10 @@ local function CreateMainFrame()
     end)
     f.filterBtn = filterBtn
 
-    -- world-drop "rares only" toggle (shares the context slot)
+    -- world-drop "rares only" toggle (shares the currency slot)
     local raresBtn = CreateFrame("Button", "AttuneNextRaresBtn", f, "UIPanelButtonTemplate")
-    raresBtn:SetWidth(200); raresBtn:SetHeight(20)
-    raresBtn:SetPoint("LEFT", zexBtn, "RIGHT", 6, 0)
+    raresBtn:SetWidth(188); raresBtn:SetHeight(20)
+    raresBtn:SetPoint("TOPLEFT", 207, -80)
     raresBtn:SetText("Rare spawns only: Off")
     raresBtn:SetScript("OnClick", function()
         ANx.db.raresOnly = not ANx.db.raresOnly
@@ -294,10 +294,10 @@ local function CreateMainFrame()
     end)
     f.raresBtn = raresBtn
 
-    -- vendor stock filter (its own slot; applies on every vendor screen)
+    -- vendor stock filter (vendor screens)
     local stockBtn = CreateFrame("Button", "AttuneNextStockBtn", f, "UIPanelButtonTemplate")
-    stockBtn:SetWidth(200); stockBtn:SetHeight(20)
-    stockBtn:SetPoint("LEFT", filterBtn, "RIGHT", 6, 0)
+    stockBtn:SetWidth(150); stockBtn:SetHeight(20)
+    stockBtn:SetPoint("TOPLEFT", 401, -80)
     stockBtn:SetText("Stock: All")
     stockBtn:SetScript("OnClick", function()
         local cur = ANx.db.stockFilter or "all"
@@ -306,6 +306,19 @@ local function CreateMainFrame()
         UI.Render()
     end)
     f.stockBtn = stockBtn
+
+    -- vendor "affordable only" toggle (vendor screens)
+    local affordBtn = CreateFrame("Button", "AttuneNextAffordBtn", f, "UIPanelButtonTemplate")
+    affordBtn:SetWidth(185); affordBtn:SetHeight(20)
+    affordBtn:SetPoint("TOPLEFT", 557, -80)
+    affordBtn:SetText("Affordable: Off")
+    affordBtn:SetScript("OnClick", function()
+        ANx.db.affordableOnly = not ANx.db.affordableOnly
+        ANx.InvalidatePlayerCurrency()
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.affordBtn = affordBtn
 
     -- ---------- search row ----------
     local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -705,7 +718,9 @@ builders["zones"] = function(view)
                 local filter = ANx.db.vendorFilter or "all"
                 local ids = Engine.VendorItemsMatchingCategory(z, filter)
                 ids = Engine.FilterByStock(ids, ANx.db.stockFilter, nil)
-                local st = Engine.Stats(ids, "zv:" .. z.zone .. ":" .. filter .. ":" .. (ANx.db.stockFilter or "all"))
+                if ANx.db.affordableOnly then ids = Engine.FilterAffordable(ids) end
+                local st = Engine.Stats(ids, "zv:" .. z.zone .. ":" .. filter .. ":" .. (ANx.db.stockFilter or "all")
+                    .. (ANx.db.affordableOnly and ":aff" or ""))
                 if st.total > 0 then
                     AddNodeRow(z.name, st, {
                         text = z.name .. (z.city and " |cffffd100(city)|r" or ""),
@@ -779,7 +794,9 @@ builders["currencies"] = function(view)
             hidden = hidden + 1
         else
             local gitems = Engine.FilterByStock(g.items, ANx.db.stockFilter, nil)
-            local st = Engine.Stats(gitems, "cur:" .. z.zone .. ":" .. g.name .. ":" .. (ANx.db.stockFilter or "all"))
+            if ANx.db.affordableOnly then gitems = Engine.FilterAffordable(gitems) end
+            local st = Engine.Stats(gitems, "cur:" .. z.zone .. ":" .. g.name .. ":" .. (ANx.db.stockFilter or "all")
+                .. (ANx.db.affordableOnly and ":aff" or ""))
             if st.total > 0 then
                 AddNodeRow(g.name, st, {
                     text = g.name,
@@ -808,8 +825,10 @@ builders["vendors"] = function(view)
     local vendors = Engine.VendorsForItems(z, view.items)
     for _, v in ipairs(vendors) do
       local vitems = Engine.FilterByStock(v.items, ANx.db.stockFilter, v.id)
+      if ANx.db.affordableOnly then vitems = Engine.FilterAffordable(vitems) end
       if ANx.NodeFactionAllowed("vendor", v.id) and #vitems > 0 then
-        local st = Engine.Stats(vitems, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency .. ":" .. (ANx.db.stockFilter or "all"))
+        local st = Engine.Stats(vitems, "ven:" .. z.zone .. ":" .. v.name .. ":" .. view.currency .. ":" .. (ANx.db.stockFilter or "all")
+            .. (ANx.db.affordableOnly and ":aff" or ""))
         local hasLoc = ANx.HasVendorLoc and ANx.HasVendorLoc(v.id)
         local vloc = { zoneName = z.name }
         local vle = v.id and ANx.VendorLocs and ANx.VendorLocs[v.id]
@@ -891,9 +910,10 @@ builders["items"] = function(view)
         itemList = Engine.FilterRareItems(itemList, view.zoneName)
     end
     -- zone-exclusive is applied globally inside Engine.Eligible / ItemRows.
-    -- vendor stock filter (limited / unlimited) on vendor item lists:
+    -- vendor stock + affordability filters on vendor item lists:
     if view.showCost then
         itemList = Engine.FilterByStock(itemList, ANx.db.stockFilter, view.vendorId)
+        if ANx.db.affordableOnly then itemList = Engine.FilterAffordable(itemList) end
     end
     local rows = Engine.ItemRows(itemList, view.zoneName, view.srcFilter)
     local skillFor
@@ -970,7 +990,9 @@ builders["items"] = function(view)
         })
     end
     if #rows == 0 then
-        if view.showCost and (ANx.db.stockFilter or "all") ~= "all" then
+        if view.showCost and ANx.db.affordableOnly then
+            AddRow({ text = "|cff888888Nothing here you can afford right now (toggle 'Affordable' off to see all)|r" })
+        elseif view.showCost and (ANx.db.stockFilter or "all") ~= "all" then
             AddRow({ text = "|cff888888No " .. ANx.db.stockFilter .. "-stock items here (change the Stock filter)|r" })
         elseif ANx.db.zoneExclusive then
             AddRow({ text = "|cff888888Nothing zone-exclusive left here (toggle 'Zone-exclusive only' off to see all)|r" })
@@ -1200,8 +1222,11 @@ function UI.Render()
         local sfLabel = (sf == "limited") and "|cffff8000Limited|r" or (sf == "unlimited") and "Unlimited" or "All"
         f.stockBtn:SetText("Stock: " .. sfLabel)
         f.stockBtn:Show()
+        f.affordBtn:SetText(ANx.db.affordableOnly and "Affordable: |cff00ff00On|r" or "Affordable: Off")
+        f.affordBtn:Show()
     else
         f.stockBtn:Hide()
+        f.affordBtn:Hide()
     end
 
     if not ANx.LootDbLoaded() then

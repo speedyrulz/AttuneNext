@@ -75,6 +75,7 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 - **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
 - **Stock** — on every vendor screen (the zone list, currency list, vendor list, and item list). Filters to All / Limited / Unlimited so you can find the limited-stock items (the ones that sell a few at a time and restock on a timer) or ignore them — counts update at each level. On a specific vendor it uses that vendor's exact stock; on the broader lists it flags an item as limited if any vendor sells it that way.
+- **Affordable** — on every vendor screen. When On, only shows items you can pay for **right now** with your current gold, honor, arena points, and emblems/tokens (an item counts if you can afford it any one of the ways it's sold). Counts update at each level, and it refreshes automatically as your balances change.
 
 The **Show attuned items** checkbox (bottom right, on item lists) also lists things you've already finished, if you want to review them.
 
@@ -127,6 +128,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.5.0**
+- Added an **Affordable** toggle on every vendor screen: only shows items you can currently pay for with your gold, honor, arena points, and emblems/tokens. Counts update at each level and refresh as your balances change.
 
 **v2.4.0**
 - Added an **Events & Holidays** category on the main menu, next to the expansions. It lists seasonal events (Hallow's End, Brewfest, Midsummer, Love is in the Air, Lunar Festival) and their attunable gear, pulled live from each event boss's loot table. Events with no attunable gear are hidden.
