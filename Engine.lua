@@ -16,6 +16,7 @@ local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, w
 local srcCache      = {}   -- [itemId]        -> sources array
 local zexCache      = {}   -- [itemId]        -> bool: drops in exactly one zone
 local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
+local eventItemsCache = {} -- [eventName]     -> { itemIds }
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
 local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
 local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
@@ -29,6 +30,7 @@ function Engine.InvalidateAll()
         {}, {}, {}, {}, {}, {}, {}
     zexCache = {}
     limitedItemsSet = nil
+    eventItemsCache = {}
     Engine.universeCache = nil
     Engine.scanJobs = {}
     Engine.scanning = false
@@ -54,6 +56,7 @@ function Engine.Universe()
     if ANx.VendorCosts then
         for id in pairs(ANx.VendorCosts) do set[id] = true end
     end
+    for _, id in ipairs(Engine.AllEventItems()) do set[id] = true end
     local arr = {}
     for id in pairs(set) do arr[#arr + 1] = id end
     if allReady then Engine.universeCache = arr end
@@ -419,6 +422,51 @@ function Engine.ZonesFor(exp, includeCities, citiesOnlyMode)
         end
     end
     return out
+end
+
+-- ---------------------------------------------------------------------
+-- Holiday / world events
+-- ---------------------------------------------------------------------
+-- Attunable items obtainable during an event: its boss's loot (pulled live
+-- from the loot DB by creature id) plus any fixed `items` list.
+function Engine.EventItems(eventEntry)
+    local cached = eventItemsCache[eventEntry.name]
+    if cached then return cached end
+    local set = {}
+    if eventEntry.items then
+        for _, id in ipairs(eventEntry.items) do
+            if ANx.IsAttunableAtAll(id) then set[id] = true end
+        end
+    end
+    if ANx.LootDbLoaded() and eventEntry.npcs and _G.ItemLocGetObjCount and _G.ItemLocGetObjAt then
+        for _, npc in ipairs(eventEntry.npcs) do
+            -- creature loot (0) and mythic-creature loot (20)
+            for _, objType in ipairs({ 0, 20 }) do
+                local cnt = _G.ItemLocGetObjCount(objType, npc)
+                if cnt and cnt > 0 then
+                    for i = 1, cnt do
+                        local _, itemId = _G.ItemLocGetObjAt(objType, npc, i)
+                        if itemId and ANx.IsAttunableAtAll(itemId) then set[itemId] = true end
+                    end
+                end
+            end
+        end
+    end
+    local arr = {}
+    for id in pairs(set) do arr[#arr + 1] = id end
+    eventItemsCache[eventEntry.name] = arr
+    return arr
+end
+
+-- Union of every event's items (for the home-menu "Events" row).
+function Engine.AllEventItems()
+    local set = {}
+    for _, e in ipairs(ANx.EventList or {}) do
+        for _, id in ipairs(Engine.EventItems(e)) do set[id] = true end
+    end
+    local arr = {}
+    for id in pairs(set) do arr[#arr + 1] = id end
+    return arr
 end
 
 -- ---------------------------------------------------------------------

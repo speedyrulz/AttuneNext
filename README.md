@@ -24,13 +24,14 @@ There's also a **minimap button** (the book icon): **left-click** to open the pl
 
 ## The basics
 
-Type **`/an`** to open or close the window. You'll see three expansions:
+Type **`/an`** to open or close the window. You'll see three expansions plus an events category:
 
 - **Classic**
 - **The Burning Crusade**
 - **Wrath of the Lich King**
+- **Events & Holidays** — attunable gear that's only obtainable during seasonal events (Hallow's End, Brewfest, the Midsummer Fire Festival, Love is in the Air, Lunar Festival). Click it to pick an event, then browse its items just like anywhere else. The gear is pulled live from the event boss's loot table, so it stays accurate.
 
-Each row shows how many items you've attuned, how many are left, and the percentage. Click one to choose a **content type**:
+Each expansion row shows how many items you've attuned, how many are left, and the percentage. Click one to choose a **content type**:
 
 | Content type | What it lists |
 |---|---|
@@ -127,6 +128,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v2.4.0**
+- Added an **Events & Holidays** category on the main menu, next to the expansions. It lists seasonal events (Hallow's End, Brewfest, Midsummer, Love is in the Air, Lunar Festival) and their attunable gear, pulled live from each event boss's loot table. Events with no attunable gear are hidden.
+
 **v2.3.0**
 - Added a **settings panel** in the Interface Options AddOns list (also `/an settings`): window scale, minimap-button toggle, debug logging, and Reset-filters / Rescan buttons.
 - Added a **minimap button**: left-click to open, right-click for settings, draggable around the minimap. Toggle it with `/an minimap` or in settings.
@@ -189,7 +193,7 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ## Where the data comes from
 
 - **Attunement status, drop rates, item sources, per-difficulty loot** — read live from Synastria's own APIs (`ItemLoc*`, `GetItemAttuneProgress`, `CanAttuneItemHelper`, `HasAttunedAnyVariantOfItem`, `GetItemTagsCustom`), as documented by **meh321** in the Synastria Discord and the **SynastriaCoreLib** wiki by imevul.
-- **Quest givers, quest chains, faction, vendor & NPC locations** — extracted from the **Questie** 3.3.5 database (widxwer/Questie).
+- **Quest givers, quest chains, faction, vendor & NPC locations, event bosses** — extracted from / verified against the **Questie** 3.3.5 database (widxwer/Questie). Event gear itself is read live from the loot DB by boss id.
 - **Vendor prices** — from **TrinityCore** TDB 3.3.5 world data (the workbook you provided).
 - **Profession recipe lists** — from **AtlasLoot** 3.3.5.
 - Structure and API usage inspired by TheJournal, synastrialoot, and VendorForgeList.

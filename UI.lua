@@ -43,7 +43,7 @@ local SORT_LABELS = {
 }
 local SORTABLE_NODE_VIEWS = {
     instances = true, zones = true, quests = true,
-    currencies = true, vendors = true, profs = true,
+    currencies = true, vendors = true, profs = true, events = true,
 }
 
 local function ViewSortModes(view)
@@ -533,6 +533,18 @@ builders["home"] = function(view)
     local scopeText = (ANx.db.scope == "account")
         and "Counts are ACCOUNT-wide (any character). Use the Attunes button to switch."
         or "Counts are for items THIS character can attune. Use the Attunes button to switch."
+    -- Events / holidays category (attunable gear only obtainable during events)
+    local evItems = Engine.AllEventItems()
+    if #evItems > 0 then
+        local est = Engine.Stats(evItems, "events:all")
+        AddRow({
+            text = "|cffff77ffEvents & Holidays|r",
+            sub = "Gear only available during seasonal events",
+            right = ANx.StatsString(est.attuned, est.total),
+            onClick = function() UI.Push({ type = "events" }) end,
+        })
+    end
+
     AddRow({
         text = "|cff888888How it works|r",
         sub = scopeText,
@@ -851,6 +863,28 @@ builders["profs"] = function(view)
     end
 end
 
+builders["events"] = function(view)
+    for _, ev in ipairs(ANx.EventList or {}) do
+        local items = Engine.EventItems(ev)
+        local st = Engine.StatsWithBest(items, "ev:" .. ev.name, nil, nil)
+        if st.total > 0 then
+            AddNodeRow(ev.name, st, {
+                text = ev.name,
+                sub = BestLine(st.best),
+                right = ANx.StatsString(st.attuned, st.total),
+                onClick = function()
+                    UI.Push({ type = "items", title = ev.name, items = items,
+                        zoneName = nil, srcFilter = nil })
+                end,
+            })
+        end
+    end
+    FlushNodeRows(CurrentSort(view))
+    if #displayRows == 0 then
+        AddRow({ text = "|cff888888No attunable event gear found (is the loot DB loaded?)|r" })
+    end
+end
+
 builders["items"] = function(view)
     local itemList = view.items
     if view.worldDrop and ANx.db.raresOnly then
@@ -1095,6 +1129,7 @@ local function ViewTitle(view)
     elseif t == "quests" then return view.zoneEntry.name .. "  -  Quests with attunables"
     elseif t == "currencies" then return view.zoneEntry.name .. "  -  Which Currency?"
     elseif t == "vendors" then return view.zoneEntry.name .. "  -  " .. view.currency .. "  -  Vendors"
+    elseif t == "events" then return "Events & Holidays  -  Which Event?"
     elseif t == "profs" then return ANx.EXP_SHORT[view.exp] .. "  -  Which Profession?"
     elseif t == "items" then return view.title or "Items"
     elseif t == "sources" then return "Item Sources"
