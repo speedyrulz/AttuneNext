@@ -12,7 +12,7 @@ ANx.UI = UI
 
 local ROW_H = 34
 local VISIBLE_ROWS = 13
-local FRAME_W = 760
+local FRAME_W = 820
 
 local DIFF_LABELS = {
     [""] = "Browse", ["N"] = "Normal", ["H"] = "Heroic", ["M"] = "Mythic",
@@ -209,7 +209,7 @@ local function CreateMainFrame()
     crumb:SetJustifyH("CENTER")
     f.crumb = crumb
 
-    -- ---------- toolbar row (scope / faction / sort / currency) ----------
+    -- ---------- toolbar row A: global item filters ----------
     -- scope: current character vs whole account
     local scopeBtn = CreateFrame("Button", "AttuneNextScopeBtn", f, "UIPanelButtonTemplate")
     scopeBtn:SetWidth(150); scopeBtn:SetHeight(20)
@@ -224,8 +224,8 @@ local function CreateMainFrame()
 
     -- faction filter: Both / Alliance / Horde
     local factionBtn = CreateFrame("Button", "AttuneNextFactionBtn", f, "UIPanelButtonTemplate")
-    factionBtn:SetWidth(140); factionBtn:SetHeight(20)
-    factionBtn:SetPoint("LEFT", scopeBtn, "RIGHT", 6, 0)
+    factionBtn:SetWidth(136); factionBtn:SetHeight(20)
+    factionBtn:SetPoint("TOPLEFT", 172, -56)
     factionBtn:SetText("Faction: Both")
     factionBtn:SetScript("OnClick", function()
         local cur = ANx.db.faction or "both"
@@ -235,21 +235,10 @@ local function CreateMainFrame()
     end)
     f.factionBtn = factionBtn
 
-    -- sort cycle button
-    local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
-    sortBtn:SetWidth(146); sortBtn:SetHeight(20)
-    sortBtn:SetPoint("LEFT", factionBtn, "RIGHT", 6, 0)
-    sortBtn:SetText("Sort: Default")
-    sortBtn:SetScript("OnClick", function()
-        CycleSort(UI.Current())
-        UI.Render()
-    end)
-    f.sortBtn = sortBtn
-
-    -- forge-tier visibility filter
+    -- forge-tier target filter
     local forgeBtn = CreateFrame("Button", "AttuneNextForgeBtn", f, "UIPanelButtonTemplate")
-    forgeBtn:SetWidth(180); forgeBtn:SetHeight(20)
-    forgeBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+    forgeBtn:SetWidth(162); forgeBtn:SetHeight(20)
+    forgeBtn:SetPoint("TOPLEFT", 314, -56)
     forgeBtn:SetText("Show: Unattuned")
     forgeBtn:SetScript("OnClick", function()
         ANx.db.forge = ((ANx.db.forge or 0) + 1) % 5
@@ -258,11 +247,10 @@ local function CreateMainFrame()
     end)
     f.forgeBtn = forgeBtn
 
-    -- ---------- toolbar row B ----------
     -- zone-exclusive toggle (global: affects counts on every level)
     local zexBtn = CreateFrame("Button", "AttuneNextZexBtn", f, "UIPanelButtonTemplate")
-    zexBtn:SetWidth(185); zexBtn:SetHeight(20)
-    zexBtn:SetPoint("TOPLEFT", 16, -80)
+    zexBtn:SetWidth(158); zexBtn:SetHeight(20)
+    zexBtn:SetPoint("TOPLEFT", 482, -56)
     zexBtn:SetText("Zone-exclusive: Off")
     zexBtn:SetScript("OnClick", function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
@@ -271,10 +259,34 @@ local function CreateMainFrame()
     end)
     f.zexBtn = zexBtn
 
+    -- bind-type filter (global: Both / BoP / BoE)
+    local bindBtn = CreateFrame("Button", "AttuneNextBindBtn", f, "UIPanelButtonTemplate")
+    bindBtn:SetWidth(150); bindBtn:SetHeight(20)
+    bindBtn:SetPoint("TOPLEFT", 646, -56)
+    bindBtn:SetText("Bind: Both")
+    bindBtn:SetScript("OnClick", function()
+        local cur = ANx.db.bindFilter or "both"
+        ANx.db.bindFilter = (cur == "both") and "bop" or (cur == "bop") and "boe" or "both"
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.bindBtn = bindBtn
+
+    -- ---------- toolbar row B: sort + context filters ----------
+    local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
+    sortBtn:SetWidth(150); sortBtn:SetHeight(20)
+    sortBtn:SetPoint("TOPLEFT", 16, -80)
+    sortBtn:SetText("Sort: Default")
+    sortBtn:SetScript("OnClick", function()
+        CycleSort(UI.Current())
+        UI.Render()
+    end)
+    f.sortBtn = sortBtn
+
     -- vendor currency filter cycle button (context: vendor zone/currency screens)
     local filterBtn = CreateFrame("Button", "AttuneNextFilterBtn", f, "UIPanelButtonTemplate")
-    filterBtn:SetWidth(188); filterBtn:SetHeight(20)
-    filterBtn:SetPoint("TOPLEFT", 207, -80)
+    filterBtn:SetWidth(190); filterBtn:SetHeight(20)
+    filterBtn:SetPoint("TOPLEFT", 172, -80)
     filterBtn:SetText("Currency: All")
     filterBtn:SetScript("OnClick", function()
         CycleVendorFilter()
@@ -282,11 +294,11 @@ local function CreateMainFrame()
     end)
     f.filterBtn = filterBtn
 
-    -- world-drop "rares only" toggle (shares the currency slot)
+    -- world-drop "rares only" toggle (shares the currency slot; never both)
     local raresBtn = CreateFrame("Button", "AttuneNextRaresBtn", f, "UIPanelButtonTemplate")
-    raresBtn:SetWidth(188); raresBtn:SetHeight(20)
-    raresBtn:SetPoint("TOPLEFT", 207, -80)
-    raresBtn:SetText("Rare spawns only: Off")
+    raresBtn:SetWidth(190); raresBtn:SetHeight(20)
+    raresBtn:SetPoint("TOPLEFT", 172, -80)
+    raresBtn:SetText("Rares only: Off")
     raresBtn:SetScript("OnClick", function()
         ANx.db.raresOnly = not ANx.db.raresOnly
         Engine.InvalidateStats()
@@ -297,7 +309,7 @@ local function CreateMainFrame()
     -- vendor stock filter (vendor screens)
     local stockBtn = CreateFrame("Button", "AttuneNextStockBtn", f, "UIPanelButtonTemplate")
     stockBtn:SetWidth(150); stockBtn:SetHeight(20)
-    stockBtn:SetPoint("TOPLEFT", 401, -80)
+    stockBtn:SetPoint("TOPLEFT", 368, -80)
     stockBtn:SetText("Stock: All")
     stockBtn:SetScript("OnClick", function()
         local cur = ANx.db.stockFilter or "all"
@@ -310,7 +322,7 @@ local function CreateMainFrame()
     -- vendor "affordable only" toggle (vendor screens)
     local affordBtn = CreateFrame("Button", "AttuneNextAffordBtn", f, "UIPanelButtonTemplate")
     affordBtn:SetWidth(185); affordBtn:SetHeight(20)
-    affordBtn:SetPoint("TOPLEFT", 557, -80)
+    affordBtn:SetPoint("TOPLEFT", 524, -80)
     affordBtn:SetText("Affordable: Off")
     affordBtn:SetScript("OnClick", function()
         ANx.db.affordableOnly = not ANx.db.affordableOnly
@@ -990,7 +1002,10 @@ builders["items"] = function(view)
         })
     end
     if #rows == 0 then
-        if view.showCost and ANx.db.affordableOnly then
+        if (ANx.db.bindFilter or "both") ~= "both" then
+            AddRow({ text = "|cff888888No " .. (ANx.db.bindFilter == "bop" and "Bind-on-Pickup" or "Bind-on-Equip")
+                .. " items here (change the Bind filter, or the item may not be cached yet)|r" })
+        elseif view.showCost and ANx.db.affordableOnly then
             AddRow({ text = "|cff888888Nothing here you can afford right now (toggle 'Affordable' off to see all)|r" })
         elseif view.showCost and (ANx.db.stockFilter or "all") ~= "all" then
             AddRow({ text = "|cff888888No " .. ANx.db.stockFilter .. "-stock items here (change the Stock filter)|r" })
@@ -1200,18 +1215,22 @@ function UI.Render()
         f.sortBtn:Hide()
     end
 
-    -- zone-exclusive toggle: global (affects counts on every level)
-    f.zexBtn:SetText(ANx.db.zoneExclusive and "Zone-exclusive only: |cffffd100On|r" or "Zone-exclusive only: Off")
+    -- zone-exclusive + bind: global (affect counts on every level)
+    f.zexBtn:SetText(ANx.db.zoneExclusive and "Zone-exclusive: |cffffd100On|r" or "Zone-exclusive: Off")
+    local bf = ANx.db.bindFilter or "both"
+    local bl = (bf == "bop") and "|cffff6060BoP only|r" or (bf == "boe") and "|cff40a0ffBoE only|r" or "Both"
+    f.bindBtn:SetText("Bind: " .. bl)
 
-    -- row B context slot (right of zone-exclusive): currency filter / rares toggle.
+    -- row B pos2: currency filter (vendor node) OR rares toggle (world drop)
     if ViewHasVendorFilter(view) then
         f.filterBtn:SetText("Currency: " .. (VENDOR_FILTER_LABELS[ANx.db.vendorFilter or "all"] or "All"))
         f.filterBtn:Show()
     else
         f.filterBtn:Hide()
     end
+    -- row B pos2 (shared): rares toggle (world drop)
     if ViewIsWorldDrop(view) then
-        f.raresBtn:SetText(ANx.db.raresOnly and "Rare spawns only: |cffff8000On|r" or "Rare spawns only: Off")
+        f.raresBtn:SetText(ANx.db.raresOnly and "Rares only: |cffff8000On|r" or "Rares only: Off")
         f.raresBtn:Show()
     else
         f.raresBtn:Hide()

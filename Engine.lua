@@ -128,6 +128,7 @@ end
 -- Full manual rescan (Refresh button / "/an reset")
 function Engine.ForceRescan()
     if ANx.db then ANx.db.structCache = nil end
+    if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
     Engine.InvalidateAll()
 end
 
@@ -343,6 +344,7 @@ end
 function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
+    if not ANx.BindAllowed(itemId) then return false end
     return true
 end
 

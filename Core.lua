@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.5.0"
+ANx.VERSION = "2.6.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -77,6 +77,7 @@ local defaults = {
     forge = 0,            -- forge target (0..4): "Left" = items at this tier or below
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
+    bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
 }
 
@@ -288,6 +289,63 @@ end
 -- Legacy "show attuned items" flag now derives from the forge threshold.
 function ANx.ShowAttunedItems()
     return (ANx.db and ANx.db.forge or 0) >= 1
+end
+
+-- ---------------------------------------------------------------------
+-- Item bind type (for the BoP / BoE filter)
+-- ---------------------------------------------------------------------
+-- Returns "BOP", "BOE", "NONE", or nil (not cached yet). Static seed first
+-- (from Data_ItemBind), else read from the item's tooltip like other addons do.
+local bindCache = {}
+local bindTip
+
+function ANx.InvalidateBindCache()
+    bindCache = {}
+end
+
+function ANx.BindType(itemId)
+    local c = bindCache[itemId]
+    if c ~= nil then return c or nil end   -- c == false means "resolved, unknown"
+    local seed = ANx.ItemBind and ANx.ItemBind[itemId]
+    if seed then bindCache[itemId] = seed; return seed end
+    if not CreateFrame then return nil end
+    if not bindTip then
+        bindTip = CreateFrame("GameTooltip", "AttuneNextBindTip", nil, "GameTooltipTemplate")
+        bindTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    end
+    bindTip:ClearLines()
+    local ok = pcall(bindTip.SetHyperlink, bindTip, "item:" .. itemId)
+    if not ok then return nil end
+    local n = bindTip:NumLines()
+    if not n or n == 0 then
+        -- item not cached; cache "unknown" so counts don't rescan every render.
+        -- Rescan (/an reset) clears this once the item has been cached.
+        bindCache[itemId] = false
+        return nil
+    end
+    local result = "NONE"
+    for i = 1, math.min(n, 6) do
+        local fs = _G["AttuneNextBindTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        if t then
+            if t == ITEM_BIND_ON_PICKUP or t == ITEM_SOULBOUND then result = "BOP"; break
+            elseif t == ITEM_BIND_ON_EQUIP then result = "BOE"; break
+            elseif t == ITEM_BIND_ON_USE then result = "BOE"; break end
+        end
+    end
+    bindCache[itemId] = result
+    return result
+end
+
+-- Bind-filter gate for item lists. "both" passes everything; a specific
+-- filter passes only that bind type (unknown/other types are hidden).
+function ANx.BindAllowed(itemId)
+    local f = ANx.db and ANx.db.bindFilter or "both"
+    if f == "both" then return true end
+    local b = ANx.BindType(itemId)
+    if f == "bop" then return b == "BOP" end
+    if f == "boe" then return b == "BOE" end
+    return true
 end
 
 -- Item-level faction gate. Neutral items always pass.

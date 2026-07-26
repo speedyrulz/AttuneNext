@@ -71,6 +71,7 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 - **Faction: Both / Alliance / Horde** — hide content locked to the other faction. Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
 - **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left → **Distance** (on item lists: Drop % → Name → Progress → Distance). *Distance* puts things in or near your current zone first (same zone, then same continent, then the rest), so it surfaces what you can go do right now. Your choice is remembered per screen.
 - **Show** (forge target) — sets a forge target and everything follows it. Pick a tier and an item counts as "left" until it's pushed **past** that tier; the **Left** number on every screen updates to match. *Unattuned* (default) = only truly unattuned items are left; *Warforged* = everything that isn't Lightforged yet is left; *Lightforged* = everything is left (nothing is beyond it). Item lists show exactly those "left" items, with forged ones tagged TF / WF / LF. (This replaces the old "Show attuned items" checkbox.)
+- **Bind** — a global filter (Both / BoP only / BoE only) that updates the counts at every level, so you can see, e.g., how many Bind-on-Equip pieces each dungeon still has without drilling in. Bind type is read from the item (built-in for vendor gear, from the tooltip otherwise); an item that isn't cached yet may not classify until you've seen it once, and Rescan re-checks after items cache.
 - **Zone-exclusive only** — a global toggle. When On, every level only counts and shows items that drop **nowhere but a single zone** — so you can see, right from the dungeon/zone list, how many exclusive items each place still has without clicking in. Great for prioritising a lockout.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 - **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
@@ -128,6 +129,12 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.6.1**
+- The **Bind** filter is now global — it updates the counts at every level of the menu (not just the final item list), so you can see each dungeon/zone/vendor's BoP or BoE totals from the list.
+
+**v2.6.0**
+- Added a **Bind** filter (Both / BoP only / BoE only). Bind type comes from built-in data for vendor gear and from the item tooltip for everything else (so an item may not classify until it's been cached).
 
 **v2.5.0**
 - Added an **Affordable** toggle on every vendor screen: only shows items you can currently pay for with your gold, honor, arena points, and emblems/tokens. Counts update at each level and refresh as your balances change.
