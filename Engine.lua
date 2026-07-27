@@ -988,15 +988,164 @@ function Engine.ContextItems(view)
     return list
 end
 
--- A random eligible, unattuned, obtainable item from the view's context (or nil).
-function Engine.RandomUnattuned(view)
-    local items = Engine.ContextItems(view)
+-- ---------------------------------------------------------------------
+-- The smart AttuneNext (random) picker
+-- ---------------------------------------------------------------------
+-- source types that have a real drop rate (exclude vendor/quest/craft)
+local DROP_SRC = { [0] = true, [1] = true, [3] = true, [7] = true, [8] = true,
+                   [14] = true, [20] = true, [21] = true }
+
+-- best drop chance for an item among its drop-type sources, or nil (no drop rate)
+function Engine.ItemBestDropChance(itemId)
+    local best
+    for _, s in ipairs(Engine.Sources(itemId)) do
+        if DROP_SRC[s.srcType] and s.chance and s.chance > 0 then
+            if not best or s.chance > best then best = s.chance end
+        end
+    end
+    return best
+end
+
+-- reverse profession lookup (itemId -> profession), built lazily
+local profOfItem
+local function ProfessionOf(itemId)
+    if not profOfItem then
+        profOfItem = {}
+        for prof, rows in pairs(ANx.ProfessionItems or {}) do
+            for _, row in ipairs(rows) do profOfItem[row[1]] = prof end
+        end
+    end
+    return profOfItem[itemId]
+end
+
+-- "node" bucket key for the focus-most-left option: which zone / instance /
+-- profession / currency an item primarily belongs to.
+function Engine.ItemBucket(itemId)
+    local _, srcName, srcType, _, zone = Engine.BestSource(itemId)
+    if srcType == ANx.SRC.VENDOR then
+        local costs = Engine.ItemCurrencies(itemId)
+        return "$" .. ((costs and costs[1] and costs[1].name) or "Vendor")
+    elseif srcType == ANx.SRC.CRAFT_TRAINER or srcType == ANx.SRC.CRAFT_RECIPE then
+        return "@" .. (ProfessionOf(itemId) or "Crafting")
+    end
+    if zone and zone ~= "" and zone ~= "Unknown" then return "#" .. zone end
+    return "#" .. (srcName or "Unknown")
+end
+
+-- Pick the next item for the AttuneNext button, honoring its config.
+-- Returns itemId (or nil) and the size of the pool it chose from.
+function Engine.AttuneNextPick(view)
+    local a = (ANx.db and ANx.db.anext) or {}
+    local ignore = a.ignore or {}
+    local items = a.context and Engine.ContextItems(view) or Engine.Universe()
+
+    -- base pool: eligible, unattuned, obtainable, not ignored
     local pool = {}
+    local seen = {}
     for _, id in ipairs(items) do
-        if Engine.Eligible(id) and not ANx.CountDone(id) and #Engine.Sources(id) > 0 then
+        if not seen[id] and not ignore[id] and Engine.Eligible(id)
+            and not ANx.CountDone(id) and #Engine.Sources(id) > 0 then
+            seen[id] = true
             pool[#pool + 1] = id
         end
     end
-    if #pool == 0 then return nil end
+
+    -- drop-rate mode: only items that actually have a drop rate
+    if a.dropRate then
+        local dp = {}
+        for _, id in ipairs(pool) do
+            if Engine.ItemBestDropChance(id) then dp[#dp + 1] = id end
+        end
+        pool = dp
+    end
+    if #pool == 0 then return nil, 0 end
+
+    -- focus: narrow to the node (zone/instance/craft/currency) with the most left
+    if a.focus then
+        local buckets, order = {}, {}
+        for _, id in ipairs(pool) do
+            local b = Engine.ItemBucket(id)
+            if not buckets[b] then buckets[b] = {}; order[#order + 1] = b end
+            buckets[b][#buckets[b] + 1] = id
+        end
+        local best
+        for _, b in ipairs(order) do
+            if not best or #buckets[b] > #buckets[best] then best = b end
+        end
+        pool = buckets[best]
+    end
+
+    if a.dropRate then
+        -- deterministic: the easiest (highest drop rate) item, so Ignore steps
+        -- through best -> next best
+        table.sort(pool, function(x, y)
+            return (Engine.ItemBestDropChance(x) or 0) > (Engine.ItemBestDropChance(y) or 0)
+        end)
+        return pool[1], #pool
+    end
     return pool[math.random(#pool)], #pool
+end
+
+-- back-compat name
+function Engine.RandomUnattuned(view)
+    return Engine.AttuneNextPick(view)
+end
+
+-- ---------------------------------------------------------------------
+-- Instance-run recommendations (expected new attunes per run)
+-- ---------------------------------------------------------------------
+-- Which (expansion, kind) pairs to consider, given the view and Context option.
+local function InstanceScope(view)
+    local a = ANx.db and ANx.db.anext or {}
+    if a.context and view then
+        local t = view.type
+        if t == "instances" then return { view.exp }, { view.kind } end
+        if t == "content" then return { view.exp }, { "D", "R" } end
+        if t == "contentExp" and (view.content == "D" or view.content == "R") then
+            return { 1, 2, 3 }, { view.content }
+        end
+    end
+    return { 1, 2, 3 }, { "D", "R" }
+end
+
+-- Ranked list of instance runs (each = a specific instance + difficulty),
+-- best first by expected new attunes per clear. Honors all filters + difficulty
+-- + Context + the ignored-instance list.
+function Engine.RankInstanceRuns(view)
+    local a = ANx.db and ANx.db.anext or {}
+    local ignoreInst = a.ignoreInst or {}
+    local exps, kinds = InstanceScope(view)
+    local runs = {}
+    for _, exp in ipairs(exps) do
+        for _, kind in ipairs(kinds) do
+            for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
+                for _, d in ipairs(Engine.InstanceDiffs(inst)) do
+                    if ANx.DifficultyMatches(d.label) then
+                        local instKey = inst.map .. ":" .. d.diff
+                        if not ignoreInst[instKey] then
+                            local expected, count = 0, 0
+                            for _, id in ipairs(d.items) do
+                                if Engine.Eligible(id) and not ANx.CountDone(id) then
+                                    count = count + 1
+                                    local chance = Engine.BestSource(id, inst.name, ANx.INSTANCE_DROP_SRC) or 0
+                                    if chance > 0 then expected = expected + chance / 100 end
+                                end
+                            end
+                            if count > 0 then
+                                runs[#runs + 1] = {
+                                    inst = inst, d = d, expected = expected,
+                                    count = count, instKey = instKey, kind = kind,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(runs, function(x, y)
+        if x.expected ~= y.expected then return x.expected > y.expected end
+        return x.count > y.count
+    end)
+    return runs
 end

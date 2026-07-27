@@ -30,7 +30,7 @@ Type **`/an`** to open or close the window. The first screen asks how you want t
 - **Filter by Content Type** — pick the content type first (Dungeons, Raids, Quests, …), then the expansion. Handy when you just want, say, "all the raids I still need."
 - **Events & Holidays** — seasonal event gear (see below).
 
-Either way you end up at the same item lists. There's also a **Random** button (top of the window) that jumps you to a random unattuned item to go get — it's context-sensitive (see below).
+Either way you end up at the same item lists. There's also an **AttuneNext** button (top of the window) that jumps you to a recommended item to go attune — random by default, with options for context, "most left," and drop-rate weighting (see below).
 
 Under **Filter by Expansion** you'll see three expansions plus events:
 
@@ -60,14 +60,16 @@ The final screen is always a list of the actual items left, **sorted by drop rat
 - **Shift-click** it to link it in chat.
 - **Hover** for the normal item tooltip.
 
-### The Random button
+### The AttuneNext button
 
-The **Random** button (top of the window) picks a random unattuned item you can obtain and takes you straight to its detail page (where it drops, drop rates, cost, etc.). It's **context-sensitive** — it picks from whatever you're currently looking at, and respects all your active filters:
+The **AttuneNext** button (top of the window) jumps you to a recommended item to attune next and opens its detail page (where it drops, drop rates, cost, etc.). By default it's **completely random** across everything you still need. The small **Opt** button next to it opens its options:
 
-- On **Classic → Crafting** it gives a random Classic crafted item; drill into **Leatherworking** first and it's a random Classic leatherworking item.
-- Under **Filter by Content Type → Quests** (before choosing an expansion) it gives a random quest-reward item from any expansion.
-- On a specific dungeon, zone, vendor, or event it picks from that place.
-- On the very first screen it picks from everything you still need.
+- **Context sensitive** — when on, it only picks from the screen you launched it from (Classic → Crafting gives a Classic craft; drill into Leatherworking first and it's leatherworking-only; Filter by Content Type → Quests with no expansion picked gives a quest reward from any expansion). Off by default.
+- **Focus the place with the most left** — aims at the single zone / instance / profession / currency that has the most items remaining, so you get the biggest haul in one trip. Respects your filters and the Context-sensitive setting.
+- **Factor in drop rates** — gives you the *easiest* (highest drop-rate) item, and the Ignore button then steps you to the next best. **This excludes vendor, quest and crafted items**, since they have no drop rate (you'll see a warning in the options).
+- **Recommend a whole dungeon/raid** — instead of one item, it points you at the best *instance* to run and tells you the **expected number of new attunes per clear** (it adds up the drop chances of everything you still need there). Respects your filters and the Difficulty/Size settings, and Ignore steps to the next-best run.
+
+All of these respect your active filters (faction, forge target, difficulty, bind, accessories, etc.). Whatever item it gives you, the detail page has an **Ignore this item** button — handy if the "best" pick is a rare spawn or seasonal boss you'd rather skip; it drops that item from future picks (clear the list from the Opt menu).
 
 ### Searching for a specific item
 
@@ -149,6 +151,16 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.9.2**
+- **Fixed the Faction filter for good.** The previous versions tried to read faction from the item tooltip, which doesn't work for raid loot on the live client (the server's "Faction:" line isn't present on a hidden scanning tooltip). The addon now ships the server-authoritative faction list (3,600+ items, the same data behind the in-game "Faction:" tooltip line), so faction-locked raid loot — including all the Trial of the Crusader Alliance/Horde items — is hidden correctly under the opposite faction with no tooltip, cache, or rescan needed.
+
+**v2.9.1**
+- Fixed the **Faction** filter still showing faction-locked raid loot (e.g. Trial of the Crusader's Alliance items): it now reads the tooltip's "Faction: Alliance/Horde" line, not just race restrictions.
+- Added a **Recommend a whole dungeon/raid** option to the AttuneNext button: it points you at the best instance to run and estimates the expected number of new attunes per clear from the drop rates.
+
+**v2.9.0**
+- Reworked the **Random** button into a smarter **AttuneNext** button (random by default) with an **Opt** menu: *Context sensitive*, *Focus the place with the most left*, and *Factor in drop rates* (which gives the easiest item and excludes vendor/quest/crafted items). The result page has an **Ignore** button to skip a pick (e.g. a rare-spawn or seasonal item) and get the next one.
 
 **v2.8.1**
 - Fixed the **Faction** filter missing raid/dungeon drops: it now reads an item's Alliance/Horde race restriction from the tooltip when it isn't in the built-in vendor data, so faction-locked raid loot (e.g. Trial of the Crusader's Alliance items) is correctly hidden under the opposite faction. (Needs the item cached, like the Bind filter; Rescan re-checks.)

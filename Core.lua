@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.8.1"
+ANx.VERSION = "2.9.2"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -111,6 +111,14 @@ local defaults = {
     accessories = true,   -- show accessory-slot items (cloak/ring/neck/trinket)
     difficulty = "all",   -- dungeon/raid difficulty tier: "all"/"normal"/"heroic"/"mythic"
     raidSize = "all",     -- raid size: "all"/"10"/"25"
+    anext = {             -- the AttuneNext (smart random) button config
+        context = false,  --   pick only from the screen you're on
+        focus = false,    --   focus the zone/instance/craft/currency with the most left
+        dropRate = false, --   factor in drop rates (excludes vendor/quest/crafted items)
+        instance = false, --   recommend a whole dungeon/raid run (not one item)
+        ignore = {},      --   [itemId] = true : items to skip
+        ignoreInst = {},  --   [instKey] = true : instance runs to skip
+    },
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
 }
 
@@ -450,15 +458,28 @@ function ANx.ItemFactionOf(itemId)
     if not ok then return nil end
     local n = factionTip:NumLines()
     if not n or n == 0 then return nil end        -- not cached yet; retry later
+    local function clean(s)
+        if not s then return nil end
+        return (s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    end
     local result = false
     for i = 1, n do
-        local fs = _G["AttuneNextFactionTipTextLeft" .. i]
-        local t = fs and fs:GetText()
-        if t then
+        local left = clean(_G["AttuneNextFactionTipTextLeft" .. i]
+            and _G["AttuneNextFactionTipTextLeft" .. i]:GetText())
+        local right = clean(_G["AttuneNextFactionTipTextRight" .. i]
+            and _G["AttuneNextFactionTipTextRight" .. i]:GetText())
+        -- Synastria shows a "Faction:" line with "Alliance"/"Horde" on the right
+        -- (some items instead show "Alliance Only"/"Horde Only" on the left).
+        if left == "Alliance" or left == "Alliance Only" or right == "Alliance" or right == "Alliance Only" then
+            result = "A"; break
+        elseif left == "Horde" or left == "Horde Only" or right == "Horde" or right == "Horde Only" then
+            result = "H"; break
+        end
+        -- fallback: a race-restriction line lists one faction's races only
+        if left then
             local a, h = 0, 0
-            for _, r in ipairs(ALLIANCE_RACES) do if t:find(r, 1, true) then a = a + 1 end end
-            for _, r in ipairs(HORDE_RACES) do if t:find(r, 1, true) then h = h + 1 end end
-            -- a faction race-restriction line lists that faction's races only
+            for _, r in ipairs(ALLIANCE_RACES) do if left:find(r, 1, true) then a = a + 1 end end
+            for _, r in ipairs(HORDE_RACES) do if left:find(r, 1, true) then h = h + 1 end end
             if a >= 3 and h == 0 then result = "A"; break
             elseif h >= 3 and a == 0 then result = "H"; break end
         end

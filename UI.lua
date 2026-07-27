@@ -226,13 +226,23 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
-    -- Random button (context-sensitive): jump to a random unattuned item
-    local randomBtn = CreateFrame("Button", "AttuneNextRandomBtn", f, "UIPanelButtonTemplate")
-    randomBtn:SetWidth(80); randomBtn:SetHeight(20)
-    randomBtn:SetPoint("TOPRIGHT", -95, -14)
-    randomBtn:SetText("Random")
-    randomBtn:SetScript("OnClick", function() UI.RandomPick() end)
-    f.randomBtn = randomBtn
+    -- AttuneNext button: jump to a recommended next item (config via the Opt button)
+    local goBtn = CreateFrame("Button", "AttuneNextGoBtn", f, "UIPanelButtonTemplate")
+    goBtn:SetWidth(96); goBtn:SetHeight(20)
+    goBtn:SetPoint("TOPRIGHT", -95, -14)
+    goBtn:SetText("AttuneNext")
+    goBtn:SetScript("OnClick", function() UI.AttuneNextGo() end)
+    f.goBtn = goBtn
+
+    -- options button for the AttuneNext button
+    local goOptBtn = CreateFrame("Button", "AttuneNextGoOptBtn", f, "UIPanelButtonTemplate")
+    goOptBtn:SetWidth(30); goOptBtn:SetHeight(20)
+    goOptBtn:SetPoint("TOPRIGHT", -195, -14)
+    goOptBtn:SetText("Opt")
+    goOptBtn:SetScript("OnClick", function()
+        if UI.Current().type ~= "anextConfig" then UI.Push({ type = "anextConfig" }) end
+    end)
+    f.goOptBtn = goOptBtn
 
     -- breadcrumb
     local crumb = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -1046,6 +1056,43 @@ builders["profs"] = function(view)
     end
 end
 
+builders["anextConfig"] = function(view)
+    local a = ANx.db.anext
+    local function toggleRow(label, key, subOn, subOff)
+        local on = a[key] == true
+        AddRow({
+            text = label .. ":  " .. (on and "|cff00ff00On|r" or "|cffaaaaaaOff|r"),
+            sub = on and subOn or subOff,
+            onClick = function() a[key] = not on; UI.Render() end,
+        })
+    end
+    toggleRow("Context sensitive", "context",
+        "Picks only from the screen you launched it from.",
+        "Off (default): picks from everything you still need.")
+    toggleRow("Focus the place with the most left", "focus",
+        "Aims at the zone / instance / profession / currency that has the most items left (respects your filters and Context sensitive).",
+        "Off: doesn't prioritise any one place.")
+    toggleRow("Factor in drop rates", "dropRate",
+        "|cffff8000Gives the easiest (highest drop-rate) item, then Ignore steps to the next best. EXCLUDES vendor / quest / crafted items - they have no drop rate.|r",
+        "Off: every obtainable item is equally likely.")
+    toggleRow("Recommend a whole dungeon/raid", "instance",
+        "Gives you the best instance to run instead of one item, with the expected number of new attunes per clear. Respects your filters and difficulty/size.",
+        "Off: recommends a single item.")
+    local n = 0
+    for _ in pairs(a.ignore or {}) do n = n + 1 end
+    if n > 0 then
+        AddRow({
+            text = "|cffff6060Clear the ignore list|r  (" .. n .. ")",
+            sub = "Items you told AttuneNext to skip via the Ignore button.",
+            onClick = function() ANx.db.anext.ignore = {}; UI.Render() end,
+        })
+    end
+    AddRow({
+        text = "|cff888888How it works|r",
+        sub = "The AttuneNext button (top) jumps to a recommended item; on the result, use Ignore to skip it and get the next pick.",
+    })
+end
+
 builders["events"] = function(view)
     for _, ev in ipairs(ANx.EventList or {}) do
         local items = Engine.EventItems(ev)
@@ -1070,6 +1117,14 @@ end
 
 builders["items"] = function(view)
     local itemList = view.items
+    -- AttuneNext "recommend a run" header + ignore action
+    if view.fromAttuneNextRun then
+        AddRow({
+            text = string.format("|cffffd100Recommended run:|r ~%.1f new attunes per clear", view.runExpected or 0),
+            sub = "|cffff8000Ignore this instance and show the next best run|r",
+            onClick = function() UI.AttuneNextIgnoreInstance(view.instKey, view.launchedFrom) end,
+        })
+    end
     if view.worldDrop and ANx.db.raresOnly then
         itemList = Engine.FilterRareItems(itemList, view.zoneName)
     end
@@ -1200,6 +1255,15 @@ builders["sources"] = function(view)
         end,
     })
 
+    -- when reached via the AttuneNext button, offer to skip this pick
+    if view.fromAttuneNext then
+        AddRow({
+            text = "|cffff8000Ignore this item and pick another|r",
+            sub = "Skips it for future AttuneNext picks (clear the list in Opt).",
+            onClick = function() UI.AttuneNextIgnore(itemId) end,
+        })
+    end
+
     local sources = Engine.Sources(itemId)
     local sorted = {}
     for _, s in ipairs(sources) do sorted[#sorted + 1] = s end
@@ -1323,6 +1387,7 @@ local function ViewTitle(view)
     elseif t == "quests" then return view.zoneEntry.name .. "  -  Quests with attunables"
     elseif t == "currencies" then return view.zoneEntry.name .. "  -  Which Currency?"
     elseif t == "vendors" then return view.zoneEntry.name .. "  -  " .. view.currency .. "  -  Vendors"
+    elseif t == "anextConfig" then return "AttuneNext button  -  Options"
     elseif t == "events" then return "Events & Holidays  -  Which Event?"
     elseif t == "profs" then return ANx.EXP_SHORT[view.exp] .. "  -  Which Profession?"
     elseif t == "items" then return view.title or "Items"
@@ -1495,20 +1560,87 @@ function UI.Toggle()
     end
 end
 
--- Random: pick a random eligible, unattuned item from the current context and
--- open its source detail. (WoW's Lua has no math.randomseed; math.random is
--- already seeded by the client, so we just call it directly.)
-function UI.RandomPick()
+-- AttuneNext: pick a recommended next item (per the button's config) and open
+-- its source detail. (WoW's Lua has no math.randomseed; math.random is already
+-- seeded by the client.)
+-- format a difficulty label suffix, e.g. " (25 Heroic)"
+local function RunLabel(d)
+    if not d or d.label == "" then return "" end
+    return " (" .. (DIFF_LABELS[d.label] or d.label) .. ")"
+end
+
+function UI.AttuneNextGo()
+    -- context-sensitive uses the screen you launched from, so remember it
+    local from = UI.Current()
+    if from and (from.type == "sources" or from.type == "items") and from.launchedFrom then
+        from = from.launchedFrom
+    end
     -- make sure the summaries are being built so wide contexts have data
     for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
-    local id = Engine.RandomUnattuned(UI.Current())
+
+    if ANx.db.anext.instance then
+        local runs = Engine.RankInstanceRuns(from)
+        if #runs > 0 then
+            local r = runs[1]
+            local lbl = RunLabel(r.d)
+            ANx.Print(string.format("Best run: |cffffff00%s%s|r  -  ~%.1f expected new attunes (%d left)",
+                r.inst.name, lbl, r.expected, r.count))
+            UI.Push({ type = "items", title = r.inst.name .. lbl, items = r.d.items,
+                zoneName = r.inst.name, srcFilter = ANx.INSTANCE_DROP_SRC,
+                fromAttuneNextRun = true, runExpected = r.expected, runCount = r.count,
+                instKey = r.instKey, launchedFrom = from })
+        elseif Engine.scanning then
+            ANx.Print("Still building the item database - try AttuneNext again in a moment.")
+        else
+            ANx.Print("No dungeon/raid runs to recommend with the current filters.")
+        end
+        return
+    end
+
+    local id = Engine.AttuneNextPick(from)
     if id then
-        local name = ANx.GetItemDisplay(id)
-        ANx.Print("Random pick: |cffffff00" .. name .. "|r")
-        UI.Push({ type = "sources", itemId = id, fromRandom = true })
+        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
     elseif Engine.scanning then
-        ANx.Print("Still building the item database - try Random again in a moment.")
+        ANx.Print("Still building the item database - try AttuneNext again in a moment.")
     else
-        ANx.Print("Nothing unattuned to pick here with the current filters.")
+        ANx.Print("Nothing to recommend here with the current filters/options.")
+    end
+end
+
+-- Ignore an instance run and show the next best one.
+function UI.AttuneNextIgnoreInstance(instKey, from)
+    ANx.db.anext.ignoreInst = ANx.db.anext.ignoreInst or {}
+    ANx.db.anext.ignoreInst[instKey] = true
+    UI.Pop()
+    local runs = Engine.RankInstanceRuns(from or UI.Current())
+    if #runs > 0 then
+        local r = runs[1]
+        local lbl = RunLabel(r.d)
+        ANx.Print(string.format("Next best run: |cffffff00%s%s|r  -  ~%.1f expected (%d left)",
+            r.inst.name, lbl, r.expected, r.count))
+        UI.Push({ type = "items", title = r.inst.name .. lbl, items = r.d.items,
+            zoneName = r.inst.name, srcFilter = ANx.INSTANCE_DROP_SRC,
+            fromAttuneNextRun = true, runExpected = r.expected, runCount = r.count,
+            instKey = r.instKey, launchedFrom = from })
+    else
+        ANx.Print("No more instance runs to recommend.")
+    end
+end
+
+-- Ignore the current item and pick the next one.
+function UI.AttuneNextIgnore(itemId)
+    ANx.db.anext.ignore = ANx.db.anext.ignore or {}
+    ANx.db.anext.ignore[itemId] = true
+    local name = ANx.GetItemDisplay(itemId)
+    ANx.Print("Ignoring |cffffff00" .. name .. "|r - picking another.")
+    -- pop the current sources view, then re-pick from where we launched
+    local cur = UI.Current()
+    local from = (cur and cur.launchedFrom) or nil
+    UI.Pop()
+    local id = Engine.AttuneNextPick(from or UI.Current())
+    if id then
+        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
+    else
+        ANx.Print("Nothing left to recommend with the current filters/options.")
     end
 end
