@@ -66,10 +66,12 @@ The **AttuneNext** button (top of the window) jumps you to a recommended item to
 
 - **Context sensitive** — when on, it only picks from the screen you launched it from (Classic → Crafting gives a Classic craft; drill into Leatherworking first and it's leatherworking-only; Filter by Content Type → Quests with no expansion picked gives a quest reward from any expansion). Off by default.
 - **Focus the place with the most left** — aims at the single zone / instance / profession / currency that has the most items remaining, so you get the biggest haul in one trip. Respects your filters and the Context-sensitive setting.
-- **Factor in drop rates** — gives you the *easiest* (highest drop-rate) item, and the Ignore button then steps you to the next best. **This excludes vendor, quest and crafted items**, since they have no drop rate (you'll see a warning in the options).
+- **Factor in drop rates** — gives you the *easiest* (highest drop-rate) item, and the Ignore button then steps you to the next best. It prefers drop items over vendor / quest / crafted ones (which have no drop rate) — but see the category note below.
 - **Recommend a whole dungeon/raid** — instead of one item, it points you at the best *instance* to run and tells you the **expected number of new attunes per clear** (it adds up the drop chances of everything you still need there). Respects your filters and the Difficulty/Size settings, and Ignore steps to the next-best run.
 
-All of these respect your active filters (faction, forge target, difficulty, bind, accessories, etc.). Whatever item it gives you, the detail page has an **Ignore this item** button — handy if the "best" pick is a rare spawn or seasonal boss you'd rather skip; it drops that item from future picks (clear the list from the Opt menu).
+**The category you're browsing wins.** If you open AttuneNext from a Quests, Vendor, Currency, Profession, Event or world-drop Zone screen, it recommends an item from *that* category — even if *Recommend a whole dungeon/raid* or *Factor in drop rates* is on. (Those options only apply where they make sense: on dungeon/raid/world-drop screens, or when you launch from a broad screen.) So browsing quests always gives you quests, and Ignore keeps stepping through them instead of dead-ending.
+
+All of these respect your active filters (faction, forge target, difficulty, bind, accessories, etc.). Whatever item it gives you, the detail page has an **Ignore this item** button — handy if the "best" pick is a rare spawn or seasonal boss you'd rather skip; it drops that item from future picks. Use **Reset the ignore list** in the Opt menu to clear every skipped item and run at once.
 
 ### Searching for a specific item
 
@@ -151,6 +153,10 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.9.3**
+- **The category you're browsing now overrides the AttuneNext options.** If you open AttuneNext from a Quests, Vendor, Currency, Profession, Event or world-drop Zone screen, it recommends an item from *that* category even when *Recommend a whole dungeon/raid* is on (previously it always jumped to a raid) and even when *Factor in drop rates* is on (previously it hid quest/vendor/crafted items, which have no drop rate, and could dead-end with "nothing left"). Drop-rate ranking still applies normally on dungeon/raid/world-drop screens where items actually have drop rates.
+- Added a **Reset the ignore list** option in the AttuneNext **Opt** menu (always visible now, shows the count) that clears both ignored items and ignored dungeon/raid runs in one click.
 
 **v2.9.2**
 - **Fixed the Faction filter for good.** The previous versions tried to read faction from the item tooltip, which doesn't work for raid loot on the live client (the server's "Faction:" line isn't present on a hidden scanning tooltip). The addon now ships the server-authoritative faction list (3,600+ items, the same data behind the in-game "Faction:" tooltip line), so faction-locked raid loot — including all the Trial of the Crusader Alliance/Horde items — is hidden correctly under the opposite faction with no tooltip, cache, or rescan needed.

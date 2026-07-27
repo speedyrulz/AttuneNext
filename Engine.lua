@@ -1034,10 +1034,14 @@ end
 
 -- Pick the next item for the AttuneNext button, honoring its config.
 -- Returns itemId (or nil) and the size of the pool it chose from.
-function Engine.AttuneNextPick(view)
+-- opts.forceContext: draw from the launch screen's category even if the global
+-- "Context sensitive" toggle is off (used when the selected category overrides a
+-- conflicting option like whole-instance mode).
+function Engine.AttuneNextPick(view, opts)
     local a = (ANx.db and ANx.db.anext) or {}
     local ignore = a.ignore or {}
-    local items = a.context and Engine.ContextItems(view) or Engine.Universe()
+    local useContext = a.context or (opts and opts.forceContext)
+    local items = useContext and Engine.ContextItems(view) or Engine.Universe()
 
     -- base pool: eligible, unattuned, obtainable, not ignored
     local pool = {}
@@ -1049,16 +1053,19 @@ function Engine.AttuneNextPick(view)
             pool[#pool + 1] = id
         end
     end
+    if #pool == 0 then return nil, 0 end
 
-    -- drop-rate mode: only items that actually have a drop rate
+    -- drop-rate mode: prefer items that actually have a drop rate. Quests, vendor
+    -- items and crafted items have none; if that would leave nothing, the selected
+    -- category wins - fall back to the full eligible pool instead of dead-ending.
+    local rankByDrop = false
     if a.dropRate then
         local dp = {}
         for _, id in ipairs(pool) do
             if Engine.ItemBestDropChance(id) then dp[#dp + 1] = id end
         end
-        pool = dp
+        if #dp > 0 then pool = dp; rankByDrop = true end
     end
-    if #pool == 0 then return nil, 0 end
 
     -- focus: narrow to the node (zone/instance/craft/currency) with the most left
     if a.focus then
@@ -1075,7 +1082,7 @@ function Engine.AttuneNextPick(view)
         pool = buckets[best]
     end
 
-    if a.dropRate then
+    if rankByDrop then
         -- deterministic: the easiest (highest drop rate) item, so Ignore steps
         -- through best -> next best
         table.sort(pool, function(x, y)

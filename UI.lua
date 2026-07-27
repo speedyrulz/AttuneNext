@@ -1073,18 +1073,29 @@ builders["anextConfig"] = function(view)
         "Aims at the zone / instance / profession / currency that has the most items left (respects your filters and Context sensitive).",
         "Off: doesn't prioritise any one place.")
     toggleRow("Factor in drop rates", "dropRate",
-        "|cffff8000Gives the easiest (highest drop-rate) item, then Ignore steps to the next best. EXCLUDES vendor / quest / crafted items - they have no drop rate.|r",
+        "Gives the easiest (highest drop-rate) item first, then Ignore steps to the next best. Prefers drop items over vendor / quest / crafted ones - but the category you're browsing wins, so on a Quests or Vendor screen you still get those.",
         "Off: every obtainable item is equally likely.")
     toggleRow("Recommend a whole dungeon/raid", "instance",
-        "Gives you the best instance to run instead of one item, with the expected number of new attunes per clear. Respects your filters and difficulty/size.",
+        "Gives you the best instance to run instead of one item, with the expected new attunes per clear. Respects your filters and difficulty/size. The category you're browsing overrides it - launch from a Quests / Vendor / Profession screen and you'll get an item from that category instead.",
         "Off: recommends a single item.")
     local n = 0
     for _ in pairs(a.ignore or {}) do n = n + 1 end
+    for _ in pairs(a.ignoreInst or {}) do n = n + 1 end
     if n > 0 then
         AddRow({
-            text = "|cffff6060Clear the ignore list|r  (" .. n .. ")",
-            sub = "Items you told AttuneNext to skip via the Ignore button.",
-            onClick = function() ANx.db.anext.ignore = {}; UI.Render() end,
+            text = "|cffff6060Reset the ignore list|r  (" .. n .. ")",
+            sub = "Clears every item and dungeon/raid you told AttuneNext to skip via the Ignore button.",
+            onClick = function()
+                ANx.db.anext.ignore = {}
+                ANx.db.anext.ignoreInst = {}
+                ANx.Print("AttuneNext ignore list cleared.")
+                UI.Render()
+            end,
+        })
+    else
+        AddRow({
+            text = "|cff777777Reset the ignore list  (empty)|r",
+            sub = "Nothing is being skipped. Use the Ignore button on a recommendation to skip it; this clears the list.",
         })
     end
     AddRow({
@@ -1569,6 +1580,29 @@ local function RunLabel(d)
     return " (" .. (DIFF_LABELS[d.label] or d.label) .. ")"
 end
 
+-- Is the screen we launched from a non-dungeon/raid category (Quests, Vendors,
+-- Currencies, Professions, Events, World-drop zones)? If so, that category
+-- overrides "Recommend a whole dungeon/raid" - we recommend an item from it.
+local function IsNonInstanceCategory(from)
+    if not from then return false end
+    local t = from.type
+    if t == "quests" or t == "currencies" or t == "vendors"
+        or t == "profs" or t == "events" or t == "zones" then
+        return true
+    end
+    if t == "contentExp" and from.content and from.content ~= "D" and from.content ~= "R" then
+        return true
+    end
+    return false
+end
+
+-- Shared item pick: when the launch category isn't dungeon/raid but whole-instance
+-- mode is on, scope the pick to that category (the category overrides the option).
+local function PickFrom(from)
+    local force = ANx.db.anext.instance and IsNonInstanceCategory(from)
+    return Engine.AttuneNextPick(from, { forceContext = force })
+end
+
 function UI.AttuneNextGo()
     -- context-sensitive uses the screen you launched from, so remember it
     local from = UI.Current()
@@ -1578,7 +1612,8 @@ function UI.AttuneNextGo()
     -- make sure the summaries are being built so wide contexts have data
     for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
 
-    if ANx.db.anext.instance then
+    -- Whole-instance mode, unless the category you're browsing overrides it.
+    if ANx.db.anext.instance and not IsNonInstanceCategory(from) then
         local runs = Engine.RankInstanceRuns(from)
         if #runs > 0 then
             local r = runs[1]
@@ -1597,7 +1632,7 @@ function UI.AttuneNextGo()
         return
     end
 
-    local id = Engine.AttuneNextPick(from)
+    local id = PickFrom(from)
     if id then
         UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
     elseif Engine.scanning then
@@ -1637,7 +1672,7 @@ function UI.AttuneNextIgnore(itemId)
     local cur = UI.Current()
     local from = (cur and cur.launchedFrom) or nil
     UI.Pop()
-    local id = Engine.AttuneNextPick(from or UI.Current())
+    local id = PickFrom(from or UI.Current())
     if id then
         UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
     else
