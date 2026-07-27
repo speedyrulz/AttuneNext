@@ -80,6 +80,7 @@ There's a **Search** box under the toolbar, available on every screen. Type part
 ### Waypoint arrows
 
 - On a **quest** screen, clicking a quest points an arrow at its quest giver. If you can't pick the quest up yet, the arrow points at the **next quest in the chain** you *can* do, and chat tells you what unlocks what.
+- On any **item's detail page** (including whatever AttuneNext recommends), a quest listed under **Sources** is clickable too — same arrow, same chain redirect, with a **[chain]** / **[in log]** / **[done]** tag showing its state.
 - On a **vendor** screen, clicking a vendor points an arrow at that vendor.
 
 Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither installed, AttuneNext just prints the location and coordinates in chat. Rows that have a known location show a small green `>`.
@@ -153,6 +154,12 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.10.0**
+- **Quest sources are now clickable on the item detail page.** When AttuneNext (or any item you open) is obtained from a quest, click the quest's row under **Sources** to drop a waypoint arrow straight to the quest giver — and if you can't pick the quest up yet, the arrow points to the next quest in the chain instead (the row is tagged **[chain]**, **[in log]** or **[done]** so you know its state). Same behaviour as the quest lists, now available right where AttuneNext sends you.
+
+**v2.9.4**
+- Fixed the AttuneNext **Opt** menu descriptions overlapping each other. The option descriptions are now short one-liners, with the "category you're browsing wins" note on its own line.
 
 **v2.9.3**
 - **The category you're browsing now overrides the AttuneNext options.** If you open AttuneNext from a Quests, Vendor, Currency, Profession, Event or world-drop Zone screen, it recommends an item from *that* category even when *Recommend a whole dungeon/raid* is on (previously it always jumped to a raid) and even when *Factor in drop rates* is on (previously it hid quest/vendor/crafted items, which have no drop rate, and could dead-end with "nothing left"). Drop-rate ranking still applies normally on dungeon/raid/world-drop screens where items actually have drop rates.

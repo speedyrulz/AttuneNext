@@ -1070,14 +1070,18 @@ builders["anextConfig"] = function(view)
         "Picks only from the screen you launched it from.",
         "Off (default): picks from everything you still need.")
     toggleRow("Focus the place with the most left", "focus",
-        "Aims at the zone / instance / profession / currency that has the most items left (respects your filters and Context sensitive).",
+        "Aims at the zone / instance / profession / currency with the most items left.",
         "Off: doesn't prioritise any one place.")
     toggleRow("Factor in drop rates", "dropRate",
-        "Gives the easiest (highest drop-rate) item first, then Ignore steps to the next best. Prefers drop items over vendor / quest / crafted ones - but the category you're browsing wins, so on a Quests or Vendor screen you still get those.",
+        "Easiest (highest drop-rate) item first; Ignore steps to the next best.",
         "Off: every obtainable item is equally likely.")
     toggleRow("Recommend a whole dungeon/raid", "instance",
-        "Gives you the best instance to run instead of one item, with the expected new attunes per clear. Respects your filters and difficulty/size. The category you're browsing overrides it - launch from a Quests / Vendor / Profession screen and you'll get an item from that category instead.",
+        "Points you at the best instance to run, with expected new attunes per clear.",
         "Off: recommends a single item.")
+    AddRow({
+        text = "|cff33ff99The category you're browsing wins|r",
+        sub = "On a Quests / Vendor / Profession screen you get an item from it, even with the two options above on.",
+    })
     local n = 0
     for _ in pairs(a.ignore or {}) do n = n + 1 end
     for _ in pairs(a.ignoreInst or {}) do n = n + 1 end
@@ -1282,6 +1286,7 @@ builders["sources"] = function(view)
     for _, s in ipairs(sorted) do
         local subText = SrcTypeLabel(s.srcType) .. (s.zoneName ~= "" and ("  -  " .. s.zoneName) or "")
         local rightText = "|cff00ff88" .. ANx.FormatChance(s.chance) .. "|r"
+        local rowText, rowClick = s.objName, nil
         if s.srcType == ANx.SRC.VENDOR then
             -- vendors: show price + stock instead of a drop chance
             local cost2 = ANx.CostString(itemId)
@@ -1291,11 +1296,31 @@ builders["sources"] = function(view)
                     .. stockText .. "|r"
             end
             rightText = cost2 and ("|cffffd100" .. cost2 .. "|r") or "|cff888888vendor|r"
+        elseif s.srcType == ANx.SRC.QUEST and s.objId then
+            -- quests: click the row to drop a waypoint arrow to the quest giver
+            -- (or to the next quest in the chain if this one isn't available yet).
+            local hasArrow = ANx.QuestGivers and ANx.QuestGivers[s.objId] ~= nil
+            local lock = ANx.GetQuestLockInfo and ANx.GetQuestLockInfo(s.objId)
+            local prefix, hint = "", "click: waypoint arrow to the quest giver"
+            if lock == "locked" then
+                prefix = "|cffff8040[chain] |r"
+                hint = "click: arrow to the next quest in the chain"
+            elseif lock == "inlog" then
+                prefix = "|cffffff00[in log] |r"
+                hint = "click: it's already in your quest log"
+            elseif lock == "completed" then
+                prefix = "|cff00ff00[done] |r"
+                hint = "already completed on this character"
+            end
+            rowText = prefix .. s.objName .. (hasArrow and "  |cff33ff99>|r" or "")
+            subText = subText .. "  |cff888888- " .. hint .. "|r"
+            rowClick = function() ANx.SetQuestWaypoint(s.objId, s.objName) end
         end
         AddRow({
-            text = s.objName,
+            text = rowText,
             sub = subText,
             right = rightText,
+            onClick = rowClick,
         })
     end
     if #sorted == 0 then
