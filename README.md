@@ -155,6 +155,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v2.11.0**
+- **Fixed missing event gear and added Noblegarden.** Some holiday gear drops from a loot *object* rather than the boss itself — e.g. Frost Lord Ahune's cloaks come from his **Ice Chest**, and Noblegarden's **Spring Circlet** comes from **Brightly Colored Eggs** — and those weren't being picked up. AttuneNext now reads gameobject loot too (including the heroic Ice Chest), added **Noblegarden** as an event, and ships a verified backbone list of each event's attunable gear so nothing slips through. Every event was reviewed: Hallow's End (Headless Horseman), Brewfest (Coren Direbrew), Midsummer (Ahune), Love is in the Air (Apothecary Hummel), Lunar Festival, and Noblegarden.
+
 **v2.10.0**
 - **Quest sources are now clickable on the item detail page.** When AttuneNext (or any item you open) is obtained from a quest, click the quest's row under **Sources** to drop a waypoint arrow straight to the quest giver — and if you can't pick the quest up yet, the arrow points to the next quest in the chain instead (the row is tagged **[chain]**, **[in log]** or **[done]** so you know its state). Same behaviour as the quest lists, now available right where AttuneNext sends you.
 

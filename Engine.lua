@@ -451,19 +451,25 @@ function Engine.EventItems(eventEntry)
             if ANx.IsAttunableAtAll(id) then set[id] = true end
         end
     end
-    if ANx.LootDbLoaded() and eventEntry.npcs and _G.ItemLocGetObjCount and _G.ItemLocGetObjAt then
-        for _, npc in ipairs(eventEntry.npcs) do
-            -- creature loot (0) and mythic-creature loot (20)
-            for _, objType in ipairs({ 0, 20 }) do
-                local cnt = _G.ItemLocGetObjCount(objType, npc)
-                if cnt and cnt > 0 then
-                    for i = 1, cnt do
-                        local _, itemId = _G.ItemLocGetObjAt(objType, npc, i)
-                        if itemId and ANx.IsAttunableAtAll(itemId) then set[itemId] = true end
+    if ANx.LootDbLoaded() and _G.ItemLocGetObjCount and _G.ItemLocGetObjAt then
+        -- Harvest every item a set of source objects drops. Holiday gear lives on
+        -- several kinds of source: the boss creature, but often a loot gameobject
+        -- (Ahune's Ice Chest, Noblegarden's Brightly Colored Egg) with its own id.
+        local function harvest(ids, objTypes)
+            for _, oid in ipairs(ids or {}) do
+                for _, objType in ipairs(objTypes) do
+                    local cnt = _G.ItemLocGetObjCount(objType, oid)
+                    if cnt and cnt > 0 then
+                        for i = 1, cnt do
+                            local _, itemId = _G.ItemLocGetObjAt(objType, oid, i)
+                            if itemId and ANx.IsAttunableAtAll(itemId) then set[itemId] = true end
+                        end
                     end
                 end
             end
         end
+        harvest(eventEntry.npcs, { 0, 20 })   -- creature + mythic-creature loot
+        harvest(eventEntry.gos,  { 1, 21 })   -- gameobject + mythic-gameobject loot
     end
     local arr = {}
     for id in pairs(set) do arr[#arr + 1] = id end
