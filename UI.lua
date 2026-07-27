@@ -12,7 +12,7 @@ ANx.UI = UI
 
 local ROW_H = 34
 local VISIBLE_ROWS = 13
-local FRAME_W = 820
+local FRAME_W = 700
 
 local DIFF_LABELS = {
     [""] = "Browse", ["N"] = "Normal", ["H"] = "Heroic", ["M"] = "Mythic",
@@ -29,6 +29,11 @@ local CONTENT_DEFS = {
     { key = "V", label = "Vendors" },
     { key = "C", label = "Crafting" },
 }
+
+-- suffix for stats-cache keys so difficulty/size changes don't collide
+local function DiffKey()
+    return (ANx.db.difficulty or "all") .. (ANx.db.raidSize or "all")
+end
 
 -- ---------------------------------------------------------------------
 -- Sorting configuration
@@ -100,6 +105,25 @@ local function ViewIsWorldDrop(view)
     return false
 end
 
+-- true if the difficulty (tier) filter is relevant (a dungeon/raid screen)
+local function ViewHasDifficulty(view)
+    if not view then return false end
+    local t = view.type
+    if t == "content" or t == "contentTypes" or t == "instances" then return true end
+    if t == "contentExp" and (view.content == "D" or view.content == "R") then return true end
+    return false
+end
+
+-- true if the raid-size filter is relevant (raids are in scope)
+local function ViewHasRaidSize(view)
+    if not view then return false end
+    local t = view.type
+    if t == "content" or t == "contentTypes" then return true end
+    if t == "contentExp" and view.content == "R" then return true end
+    if t == "instances" and view.kind == "R" then return true end
+    return false
+end
+
 -- true if the vendor stock filter applies to this view (any vendor screen)
 local function ViewHasStockFilter(view)
     if not view then return false end
@@ -156,7 +180,7 @@ local function CreateMainFrame()
     Engine = ANx.Engine
     local f = CreateFrame("Frame", "AttuneNextFrame", UIParent)
     f:SetWidth(FRAME_W)
-    f:SetHeight(ROW_H * VISIBLE_ROWS + 170)
+    f:SetHeight(ROW_H * VISIBLE_ROWS + 194)
     f:SetPoint("CENTER", 0, 40)
     f:SetFrameStrata("HIGH")
     f:EnableMouse(true)
@@ -202,6 +226,14 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
+    -- Random button (context-sensitive): jump to a random unattuned item
+    local randomBtn = CreateFrame("Button", "AttuneNextRandomBtn", f, "UIPanelButtonTemplate")
+    randomBtn:SetWidth(80); randomBtn:SetHeight(20)
+    randomBtn:SetPoint("TOPRIGHT", -95, -14)
+    randomBtn:SetText("Random")
+    randomBtn:SetScript("OnClick", function() UI.RandomPick() end)
+    f.randomBtn = randomBtn
+
     -- breadcrumb
     local crumb = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     crumb:SetPoint("TOP", 0, -38)
@@ -209,8 +241,8 @@ local function CreateMainFrame()
     crumb:SetJustifyH("CENTER")
     f.crumb = crumb
 
-    -- ---------- toolbar row A: global item filters ----------
-    -- scope: current character vs whole account
+    -- ================= toolbar =================
+    -- Row A: scope / faction / forge / sort
     local scopeBtn = CreateFrame("Button", "AttuneNextScopeBtn", f, "UIPanelButtonTemplate")
     scopeBtn:SetWidth(150); scopeBtn:SetHeight(20)
     scopeBtn:SetPoint("TOPLEFT", 16, -56)
@@ -222,9 +254,8 @@ local function CreateMainFrame()
     end)
     f.scopeBtn = scopeBtn
 
-    -- faction filter: Both / Alliance / Horde
     local factionBtn = CreateFrame("Button", "AttuneNextFactionBtn", f, "UIPanelButtonTemplate")
-    factionBtn:SetWidth(136); factionBtn:SetHeight(20)
+    factionBtn:SetWidth(138); factionBtn:SetHeight(20)
     factionBtn:SetPoint("TOPLEFT", 172, -56)
     factionBtn:SetText("Faction: Both")
     factionBtn:SetScript("OnClick", function()
@@ -235,10 +266,9 @@ local function CreateMainFrame()
     end)
     f.factionBtn = factionBtn
 
-    -- forge-tier target filter
     local forgeBtn = CreateFrame("Button", "AttuneNextForgeBtn", f, "UIPanelButtonTemplate")
-    forgeBtn:SetWidth(162); forgeBtn:SetHeight(20)
-    forgeBtn:SetPoint("TOPLEFT", 314, -56)
+    forgeBtn:SetWidth(164); forgeBtn:SetHeight(20)
+    forgeBtn:SetPoint("TOPLEFT", 316, -56)
     forgeBtn:SetText("Show: Unattuned")
     forgeBtn:SetScript("OnClick", function()
         ANx.db.forge = ((ANx.db.forge or 0) + 1) % 5
@@ -247,10 +277,20 @@ local function CreateMainFrame()
     end)
     f.forgeBtn = forgeBtn
 
-    -- zone-exclusive toggle (global: affects counts on every level)
+    local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
+    sortBtn:SetWidth(150); sortBtn:SetHeight(20)
+    sortBtn:SetPoint("TOPLEFT", 486, -56)
+    sortBtn:SetText("Sort: Default")
+    sortBtn:SetScript("OnClick", function()
+        CycleSort(UI.Current())
+        UI.Render()
+    end)
+    f.sortBtn = sortBtn
+
+    -- Row B: global item filters (zone-exclusive / bind / accessories)
     local zexBtn = CreateFrame("Button", "AttuneNextZexBtn", f, "UIPanelButtonTemplate")
-    zexBtn:SetWidth(158); zexBtn:SetHeight(20)
-    zexBtn:SetPoint("TOPLEFT", 482, -56)
+    zexBtn:SetWidth(180); zexBtn:SetHeight(20)
+    zexBtn:SetPoint("TOPLEFT", 16, -80)
     zexBtn:SetText("Zone-exclusive: Off")
     zexBtn:SetScript("OnClick", function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
@@ -259,10 +299,9 @@ local function CreateMainFrame()
     end)
     f.zexBtn = zexBtn
 
-    -- bind-type filter (global: Both / BoP / BoE)
     local bindBtn = CreateFrame("Button", "AttuneNextBindBtn", f, "UIPanelButtonTemplate")
     bindBtn:SetWidth(150); bindBtn:SetHeight(20)
-    bindBtn:SetPoint("TOPLEFT", 646, -56)
+    bindBtn:SetPoint("TOPLEFT", 202, -80)
     bindBtn:SetText("Bind: Both")
     bindBtn:SetScript("OnClick", function()
         local cur = ANx.db.bindFilter or "both"
@@ -272,21 +311,21 @@ local function CreateMainFrame()
     end)
     f.bindBtn = bindBtn
 
-    -- ---------- toolbar row B: sort + context filters ----------
-    local sortBtn = CreateFrame("Button", "AttuneNextSortBtn", f, "UIPanelButtonTemplate")
-    sortBtn:SetWidth(150); sortBtn:SetHeight(20)
-    sortBtn:SetPoint("TOPLEFT", 16, -80)
-    sortBtn:SetText("Sort: Default")
-    sortBtn:SetScript("OnClick", function()
-        CycleSort(UI.Current())
+    local accBtn = CreateFrame("Button", "AttuneNextAccBtn", f, "UIPanelButtonTemplate")
+    accBtn:SetWidth(185); accBtn:SetHeight(20)
+    accBtn:SetPoint("TOPLEFT", 358, -80)
+    accBtn:SetText("Accessories: On")
+    accBtn:SetScript("OnClick", function()
+        ANx.db.accessories = not (ANx.db.accessories ~= false)
+        Engine.InvalidateStats()
         UI.Render()
     end)
-    f.sortBtn = sortBtn
+    f.accBtn = accBtn
 
-    -- vendor currency filter cycle button (context: vendor zone/currency screens)
+    -- Row C: vendor / world-drop context filters
     local filterBtn = CreateFrame("Button", "AttuneNextFilterBtn", f, "UIPanelButtonTemplate")
     filterBtn:SetWidth(190); filterBtn:SetHeight(20)
-    filterBtn:SetPoint("TOPLEFT", 172, -80)
+    filterBtn:SetPoint("TOPLEFT", 16, -104)
     filterBtn:SetText("Currency: All")
     filterBtn:SetScript("OnClick", function()
         CycleVendorFilter()
@@ -297,7 +336,7 @@ local function CreateMainFrame()
     -- world-drop "rares only" toggle (shares the currency slot; never both)
     local raresBtn = CreateFrame("Button", "AttuneNextRaresBtn", f, "UIPanelButtonTemplate")
     raresBtn:SetWidth(190); raresBtn:SetHeight(20)
-    raresBtn:SetPoint("TOPLEFT", 172, -80)
+    raresBtn:SetPoint("TOPLEFT", 16, -104)
     raresBtn:SetText("Rares only: Off")
     raresBtn:SetScript("OnClick", function()
         ANx.db.raresOnly = not ANx.db.raresOnly
@@ -306,10 +345,9 @@ local function CreateMainFrame()
     end)
     f.raresBtn = raresBtn
 
-    -- vendor stock filter (vendor screens)
     local stockBtn = CreateFrame("Button", "AttuneNextStockBtn", f, "UIPanelButtonTemplate")
     stockBtn:SetWidth(150); stockBtn:SetHeight(20)
-    stockBtn:SetPoint("TOPLEFT", 368, -80)
+    stockBtn:SetPoint("TOPLEFT", 212, -104)
     stockBtn:SetText("Stock: All")
     stockBtn:SetScript("OnClick", function()
         local cur = ANx.db.stockFilter or "all"
@@ -319,10 +357,9 @@ local function CreateMainFrame()
     end)
     f.stockBtn = stockBtn
 
-    -- vendor "affordable only" toggle (vendor screens)
     local affordBtn = CreateFrame("Button", "AttuneNextAffordBtn", f, "UIPanelButtonTemplate")
     affordBtn:SetWidth(185); affordBtn:SetHeight(20)
-    affordBtn:SetPoint("TOPLEFT", 524, -80)
+    affordBtn:SetPoint("TOPLEFT", 368, -104)
     affordBtn:SetText("Affordable: Off")
     affordBtn:SetScript("OnClick", function()
         ANx.db.affordableOnly = not ANx.db.affordableOnly
@@ -332,14 +369,42 @@ local function CreateMainFrame()
     end)
     f.affordBtn = affordBtn
 
+    -- difficulty tier filter (shares pos1 with currency/rares; D/R screens)
+    local diffBtn = CreateFrame("Button", "AttuneNextDiffBtn", f, "UIPanelButtonTemplate")
+    diffBtn:SetWidth(190); diffBtn:SetHeight(20)
+    diffBtn:SetPoint("TOPLEFT", 16, -104)
+    diffBtn:SetText("Difficulty: All")
+    diffBtn:SetScript("OnClick", function()
+        local order = { "all", "normal", "heroic", "mythic" }
+        local cur = ANx.db.difficulty or "all"
+        for i, v in ipairs(order) do if v == cur then ANx.db.difficulty = order[(i % #order) + 1]; break end end
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.diffBtn = diffBtn
+
+    -- raid-size filter (shares pos2 with stock; raid screens)
+    local sizeBtn = CreateFrame("Button", "AttuneNextSizeBtn", f, "UIPanelButtonTemplate")
+    sizeBtn:SetWidth(150); sizeBtn:SetHeight(20)
+    sizeBtn:SetPoint("TOPLEFT", 212, -104)
+    sizeBtn:SetText("Size: All")
+    sizeBtn:SetScript("OnClick", function()
+        local order = { "all", "10", "25" }
+        local cur = ANx.db.raidSize or "all"
+        for i, v in ipairs(order) do if v == cur then ANx.db.raidSize = order[(i % #order) + 1]; break end end
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+    f.sizeBtn = sizeBtn
+
     -- ---------- search row ----------
     local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    searchLabel:SetPoint("TOPLEFT", 20, -110)
+    searchLabel:SetPoint("TOPLEFT", 20, -134)
     searchLabel:SetText("Search:")
 
     local searchBox = CreateFrame("EditBox", "AttuneNextSearchBox", f, "InputBoxTemplate")
     searchBox:SetWidth(300); searchBox:SetHeight(18)
-    searchBox:SetPoint("TOPLEFT", 74, -106)
+    searchBox:SetPoint("TOPLEFT", 74, -130)
     searchBox:SetAutoFocus(false)
     searchBox:SetScript("OnEscapePressed", function(self)
         self:SetText(""); self:ClearFocus()
@@ -369,7 +434,7 @@ local function CreateMainFrame()
 
     -- scroll area
     local scroll = CreateFrame("ScrollFrame", "AttuneNextScroll", f, "FauxScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 16, -130)
+    scroll:SetPoint("TOPLEFT", 16, -154)
     scroll:SetPoint("BOTTOMRIGHT", -36, 38)
     scroll:SetScript("OnVerticalScroll", function(self, offset)
         FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.Render)
@@ -381,7 +446,7 @@ local function CreateMainFrame()
         local b = CreateFrame("Button", "AttuneNextRow" .. i, f)
         b:SetWidth(FRAME_W - 56)
         b:SetHeight(ROW_H)
-        b:SetPoint("TOPLEFT", 20, -130 - (i - 1) * ROW_H)
+        b:SetPoint("TOPLEFT", 20, -154 - (i - 1) * ROW_H)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
 
         b.icon = b:CreateTexture(nil, "ARTWORK")
@@ -537,12 +602,43 @@ local function SummaryRow(exp, onReady)
     return sum
 end
 
+-- Root menu: choose how to browse.
+builders["root"] = function(view)
+    -- kick off the background scans so counts are ready when you drill in
+    for exp = 1, 3 do SummaryRow(exp, UI.RefreshIfShown) end
+    AddRow({
+        text = "|cffffd100Filter by Expansion|r",
+        sub = "Pick Classic / TBC / WotLK first, then the content type",
+        onClick = function() UI.Push({ type = "home" }) end,
+    })
+    AddRow({
+        text = "|cffffd100Filter by Content Type|r",
+        sub = "Pick Dungeons / Raids / Quests / etc. first, then the expansion",
+        onClick = function() UI.Push({ type = "contentTypes" }) end,
+    })
+    local evItems = Engine.AllEventItems()
+    if #evItems > 0 then
+        local est = Engine.Stats(evItems, "events:all")
+        AddRow({
+            text = "|cffff77ffEvents & Holidays|r",
+            sub = "Gear only available during seasonal events",
+            right = ANx.StatsString(est.attuned, est.total),
+            onClick = function() UI.Push({ type = "events" }) end,
+        })
+    end
+    AddRow({
+        text = "|cff888888How it works|r",
+        sub = "Use the Random button (top) any time to jump to a random item to attune.",
+        tooltipText = "Character scope: counts every item the current character can attune. Account scope: counts every attunable item (any character).\n\nThe global filters (Faction, Show/forge, Zone-exclusive, Bind, Accessories, Difficulty) adjust the counts at every level.\n\nRandom picks a random unattuned item from whatever you're currently looking at.",
+    })
+end
+
 builders["home"] = function(view)
     for exp = 1, 3 do
         local sum = SummaryRow(exp, UI.RefreshIfShown)
         local rightText, subText
         if sum then
-            local st = Engine.UnionStats({ sum.D, sum.R, sum.Q, sum.W, sum.V, sum.C }, "sum:" .. exp .. ":all")
+            local st = Engine.UnionStats(Engine.AllContentSets(sum), "sum:" .. exp .. ":all:" .. DiffKey())
             rightText = ANx.StatsString(st.attuned, st.total)
             subText = ""
         else
@@ -559,21 +655,8 @@ builders["home"] = function(view)
         and "Counts are ACCOUNT-wide (any character). Use the Attunes button to switch."
         or "Counts are for items THIS character can attune. Use the Attunes button to switch."
     -- Events / holidays category (attunable gear only obtainable during events)
-    local evItems = Engine.AllEventItems()
-    if #evItems > 0 then
-        local est = Engine.Stats(evItems, "events:all")
-        AddRow({
-            text = "|cffff77ffEvents & Holidays|r",
-            sub = "Gear only available during seasonal events",
-            right = ANx.StatsString(est.attuned, est.total),
-            onClick = function() UI.Push({ type = "events" }) end,
-        })
-    end
-
     AddRow({
-        text = "|cff888888How it works|r",
-        sub = scopeText,
-        tooltipText = "Character scope: counts every item the current character can attune (class, armor and level are checked by the server), attuned = 100% progress.\n\nAccount scope: counts every attunable item, attuned = any variant done by any character on your account.\n\nThe Faction button hides quests, vendors and gear locked to the other faction.\n\nDrop rates and sources come straight from Synastria's built-in loot database.",
+        text = "|cff888888" .. scopeText .. "|r",
     })
 end
 
@@ -583,7 +666,8 @@ builders["content"] = function(view)
     for _, def in ipairs(CONTENT_DEFS) do
         local rightText = "|cff888888Scanning...|r"
         if sum then
-            local st = Engine.SetStats(sum[def.key], "sum:" .. exp .. ":" .. def.key)
+            local st = Engine.SetStats(Engine.ContentSet(sum, def.key),
+                "sum:" .. exp .. ":" .. def.key .. ":" .. DiffKey())
             rightText = ANx.StatsString(st.attuned, st.total)
         end
         AddRow({
@@ -606,26 +690,91 @@ builders["content"] = function(view)
     end
 end
 
+-- content-first: list the content types (totals across all expansions)
+local function PushContentNode(cat, exp)
+    if cat == "D" or cat == "R" then UI.Push({ type = "instances", exp = exp, kind = cat })
+    elseif cat == "Q" then UI.Push({ type = "zones", exp = exp, mode = "Q" })
+    elseif cat == "W" then UI.Push({ type = "zones", exp = exp, mode = "W" })
+    elseif cat == "V" then UI.Push({ type = "zones", exp = exp, mode = "V" })
+    else UI.Push({ type = "profs", exp = exp }) end
+end
+
+builders["contentTypes"] = function(view)
+    for _, def in ipairs(CONTENT_DEFS) do
+        local sets, ready = {}, true
+        for exp = 1, 3 do
+            local sum = SummaryRow(exp, UI.RefreshIfShown)
+            if sum then sets[#sets + 1] = Engine.ContentSet(sum, def.key) else ready = false end
+        end
+        local rightText = "|cff888888Scanning...|r"
+        if ready then
+            local st = Engine.UnionStats(sets, "ct:" .. def.key .. ":" .. DiffKey())
+            rightText = ANx.StatsString(st.attuned, st.total)
+        end
+        AddRow({
+            text = def.label,
+            right = rightText,
+            onClick = function() UI.Push({ type = "contentExp", content = def.key }) end,
+        })
+    end
+end
+
+-- content-first: after a content type, pick the expansion (or use Random for any)
+builders["contentExp"] = function(view)
+    local cat = view.content
+    for exp = 1, 3 do
+        local sum = SummaryRow(exp, UI.RefreshIfShown)
+        local rightText = "|cff888888Scanning...|r"
+        if sum then
+            local st = Engine.SetStats(Engine.ContentSet(sum, cat),
+                "ce:" .. exp .. ":" .. cat .. ":" .. DiffKey())
+            rightText = ANx.StatsString(st.attuned, st.total)
+        end
+        AddRow({
+            text = ANx.EXP_COLORS[exp] .. ANx.EXP_NAMES[exp] .. "|r",
+            right = rightText,
+            onClick = function() PushContentNode(cat, exp) end,
+        })
+    end
+end
+
 builders["instances"] = function(view)
     local list = Engine.InstancesFor(view.exp, view.kind)
     local mode = CurrentSort(view)
     -- build one group per instance (header + difficulty rows stay together),
     -- sorted by the instance's aggregate stats
     local groups = {}
+    local shownInstances = 0
     for _, inst in ipairs(list) do
-        local diffs = Engine.InstanceDiffs(inst)
+        -- apply the difficulty / raid-size filter to the shown difficulty rows
+        local diffs = {}
+        for _, d in ipairs(Engine.InstanceDiffs(inst)) do
+            if ANx.DifficultyMatches(d.label) then diffs[#diffs + 1] = d end
+        end
+        if #diffs == 0 then
+            -- nothing matches the difficulty filter for this instance; skip it
+        else
+        shownInstances = shownInstances + 1
         local group = { name = inst.name:lower(), rows = {}, att = 0, tot = 0 }
         if #diffs == 1 then
             local d = diffs[1]
             local key = "i:" .. inst.map .. ":" .. d.diff
             local st = Engine.StatsWithBest(d.items, key, inst.name, ANx.INSTANCE_DROP_SRC)
             group.att, group.tot = st.attuned, st.total
+            -- show the difficulty label when a filter has collapsed this to one row
+            local nameText = inst.name
+            local title = inst.name
+            if d.label ~= "" then
+                local dl = DIFF_LABELS[d.label] or d.label
+                nameText = inst.name .. "  |cffcccccc(" .. dl .. ")|r"
+                title = inst.name .. " (" .. dl .. ")"
+            end
             group.rows[1] = {
-                text = inst.name,
+                text = nameText,
                 sub = BestLine(st.best),
                 right = ANx.StatsString(st.attuned, st.total),
                 onClick = function()
-                    UI.Push({ type = "items", title = inst.name, items = d.items,
+                    UI.Push({ type = "items", title = title, items = d.items,
                         zoneName = inst.name, srcFilter = ANx.INSTANCE_DROP_SRC })
                 end,
             }
@@ -649,6 +798,7 @@ builders["instances"] = function(view)
             end
         end
         groups[#groups + 1] = group
+        end
     end
     if mode == "name" or mode == "distance" then
         -- instances have no world coordinates; Distance falls back to name order
@@ -672,6 +822,8 @@ builders["instances"] = function(view)
     end
     if #list == 0 then
         AddRow({ text = "|cff888888No instances found|r" })
+    elseif shownInstances == 0 then
+        AddRow({ text = "|cff888888No instances at this difficulty (change the Difficulty filter)|r" })
     end
 end
 
@@ -1153,9 +1305,14 @@ end
 -- ---------------------------------------------------------------------
 -- Breadcrumb titles
 -- ---------------------------------------------------------------------
+local CONTENT_LABELS = { D = "Dungeons", R = "Raids", Q = "Quests", W = "World Drops", V = "Vendors", C = "Crafting" }
+
 local function ViewTitle(view)
     local t = view.type
-    if t == "home" then return "Select Expansion"
+    if t == "root" then return "How do you want to browse?"
+    elseif t == "contentTypes" then return "Filter by Content Type  -  Which Content?"
+    elseif t == "contentExp" then return (CONTENT_LABELS[view.content] or "Content") .. "  -  Which Expansion?"
+    elseif t == "home" then return "Select Expansion"
     elseif t == "content" then return ANx.EXP_NAMES[view.exp] .. "  -  Select Content"
     elseif t == "instances" then
         return ANx.EXP_SHORT[view.exp] .. "  -  " .. (view.kind == "D" and "Which Dungeon?" or "Which Raid?")
@@ -1215,27 +1372,36 @@ function UI.Render()
         f.sortBtn:Hide()
     end
 
-    -- zone-exclusive + bind: global (affect counts on every level)
+    -- zone-exclusive + bind + accessories: global (affect counts on every level)
     f.zexBtn:SetText(ANx.db.zoneExclusive and "Zone-exclusive: |cffffd100On|r" or "Zone-exclusive: Off")
     local bf = ANx.db.bindFilter or "both"
     local bl = (bf == "bop") and "|cffff6060BoP only|r" or (bf == "boe") and "|cff40a0ffBoE only|r" or "Both"
     f.bindBtn:SetText("Bind: " .. bl)
+    f.accBtn:SetText(ANx.db.accessories ~= false and "Accessories: On" or "Accessories: |cffffd100Off|r")
 
-    -- row B pos2: currency filter (vendor node) OR rares toggle (world drop)
+    -- row C pos1: currency (vendor node) / rares (world drop) / difficulty (D/R)
+    local hasDiff = ViewHasDifficulty(view)
     if ViewHasVendorFilter(view) then
         f.filterBtn:SetText("Currency: " .. (VENDOR_FILTER_LABELS[ANx.db.vendorFilter or "all"] or "All"))
         f.filterBtn:Show()
     else
         f.filterBtn:Hide()
     end
-    -- row B pos2 (shared): rares toggle (world drop)
     if ViewIsWorldDrop(view) then
         f.raresBtn:SetText(ANx.db.raresOnly and "Rares only: |cffff8000On|r" or "Rares only: Off")
         f.raresBtn:Show()
     else
         f.raresBtn:Hide()
     end
-    -- stock filter (its own slot): on every vendor screen
+    if hasDiff then
+        local d = ANx.db.difficulty or "all"
+        local dcol = (d ~= "all") and "|cffffd100" or ""
+        f.diffBtn:SetText("Difficulty: " .. dcol .. (ANx.DIFF_TIER_LABELS[d] or "All") .. (dcol ~= "" and "|r" or ""))
+        f.diffBtn:Show()
+    else
+        f.diffBtn:Hide()
+    end
+    -- row C pos2: stock (vendor) / raid size (raid)
     if ViewHasStockFilter(view) then
         local sf = ANx.db.stockFilter or "all"
         local sfLabel = (sf == "limited") and "|cffff8000Limited|r" or (sf == "unlimited") and "Unlimited" or "All"
@@ -1246,6 +1412,14 @@ function UI.Render()
     else
         f.stockBtn:Hide()
         f.affordBtn:Hide()
+    end
+    if ViewHasRaidSize(view) then
+        local sz = ANx.db.raidSize or "all"
+        local zcol = (sz ~= "all") and "|cffffd100" or ""
+        f.sizeBtn:SetText("Size: " .. zcol .. (ANx.RAID_SIZE_LABELS[sz] or "All") .. (zcol ~= "" and "|r" or ""))
+        f.sizeBtn:Show()
+    else
+        f.sizeBtn:Hide()
     end
 
     if not ANx.LootDbLoaded() then
@@ -1301,7 +1475,7 @@ function UI.Show(reset)
         UI.frame = CreateMainFrame()
     end
     if reset or #UI.stack == 0 then
-        UI.stack = { { type = "home" } }
+        UI.stack = { { type = "root" } }
         UI.searchQuery = ""
         if UI.frame.searchBox then
             UI._searchSetting = true
@@ -1318,5 +1492,23 @@ function UI.Toggle()
         UI.frame:Hide()
     else
         UI.Show(false)
+    end
+end
+
+-- Random: pick a random eligible, unattuned item from the current context and
+-- open its source detail. (WoW's Lua has no math.randomseed; math.random is
+-- already seeded by the client, so we just call it directly.)
+function UI.RandomPick()
+    -- make sure the summaries are being built so wide contexts have data
+    for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
+    local id = Engine.RandomUnattuned(UI.Current())
+    if id then
+        local name = ANx.GetItemDisplay(id)
+        ANx.Print("Random pick: |cffffff00" .. name .. "|r")
+        UI.Push({ type = "sources", itemId = id, fromRandom = true })
+    elseif Engine.scanning then
+        ANx.Print("Still building the item database - try Random again in a moment.")
+    else
+        ANx.Print("Nothing unattuned to pick here with the current filters.")
     end
 end

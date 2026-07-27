@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.6.1"
+ANx.VERSION = "2.8.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -14,6 +14,36 @@ ANx.VERSION = "2.6.1"
 ANx.EXP_NAMES  = { [1] = "Classic", [2] = "The Burning Crusade", [3] = "Wrath of the Lich King" }
 ANx.EXP_SHORT  = { [1] = "Classic", [2] = "TBC", [3] = "WotLK" }
 ANx.EXP_COLORS = { [1] = "|cffe6cc80", [2] = "|cff1eff00", [3] = "|cff66ccff" }
+
+-- Difficulty tier + raid size for each instance-difficulty label (Data_Instances).
+ANx.DIFF_TIER = {
+    [""]    = "normal", ["N"] = "normal", ["H"] = "heroic", ["M"] = "mythic",
+    ["10"]  = "normal", ["25"] = "normal",
+    ["10N"] = "normal", ["25N"] = "normal", ["10H"] = "heroic", ["25H"] = "heroic",
+}
+ANx.DIFF_SIZE = {  -- nil = size-agnostic (dungeons, single-difficulty raids)
+    ["10"] = "10", ["25"] = "25",
+    ["10N"] = "10", ["25N"] = "25", ["10H"] = "10", ["25H"] = "25",
+}
+ANx.DIFF_TIER_LABELS = { all = "All", normal = "Normal", heroic = "Heroic", mythic = "Mythic" }
+ANx.RAID_SIZE_LABELS = { all = "All", ["10"] = "10-man", ["25"] = "25-man" }
+
+-- Does an instance-difficulty label pass the difficulty tier + raid-size filters?
+function ANx.DifficultyMatches(label)
+    local d = ANx.db and ANx.db.difficulty or "all"
+    if d ~= "all" and (ANx.DIFF_TIER[label] or "normal") ~= d then return false end
+    local sz = ANx.db and ANx.db.raidSize or "all"
+    if sz ~= "all" then
+        local ls = ANx.DIFF_SIZE[label]   -- nil = size-agnostic, always matches
+        if ls and ls ~= sz then return false end
+    end
+    return true
+end
+
+-- Is any difficulty/size filter active? (for count adjustments)
+function ANx.DifficultyFilterActive()
+    return (ANx.db and (ANx.db.difficulty ~= "all" or ANx.db.raidSize ~= "all")) or false
+end
 
 -- ItemLoc source types (official server documentation)
 ANx.SRC = {
@@ -78,6 +108,9 @@ local defaults = {
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
+    accessories = true,   -- show accessory-slot items (cloak/ring/neck/trinket)
+    difficulty = "all",   -- dungeon/raid difficulty tier: "all"/"normal"/"heroic"/"mythic"
+    raidSize = "all",     -- raid size: "all"/"10"/"25"
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
 }
 
@@ -337,6 +370,46 @@ function ANx.BindType(itemId)
     return result
 end
 
+-- ---------------------------------------------------------------------
+-- Accessories (cloak / ring / neck / trinket) - not armor-type restricted,
+-- so any character on the account can attune them.
+-- ---------------------------------------------------------------------
+local accCache = {}
+local ACCESSORY_LOC = {
+    INVTYPE_CLOAK = true, INVTYPE_FINGER = true,
+    INVTYPE_NECK = true, INVTYPE_TRINKET = true,
+}
+
+function ANx.InvalidateAccessoryCache()
+    accCache = {}
+end
+
+-- true if the item is a cloak/ring/neck/trinket. Static seed first, else the
+-- item's equip location (needs the item cached; cached "false" once resolved).
+function ANx.IsAccessory(itemId)
+    local c = accCache[itemId]
+    if c ~= nil then return c end
+    if ANx.AccessoryItems and ANx.AccessoryItems[itemId] then
+        accCache[itemId] = true; return true
+    end
+    local loc
+    if GetItemInfoCustom then loc = select(9, GetItemInfoCustom(itemId)) end
+    if (not loc or loc == "") and GetItemInfo then loc = select(9, GetItemInfo(itemId)) end
+    if not loc or loc == "" then
+        accCache[itemId] = false  -- uncached; assume not-accessory (safe: don't hide)
+        return false
+    end
+    local r = ACCESSORY_LOC[loc] == true
+    accCache[itemId] = r
+    return r
+end
+
+-- Gate: when accessories are toggled off, hide accessory items.
+function ANx.AccessoryAllowed(itemId)
+    if not ANx.db or ANx.db.accessories ~= false then return true end
+    return not ANx.IsAccessory(itemId)
+end
+
 -- Bind-filter gate for item lists. "both" passes everything; a specific
 -- filter passes only that bind type (unknown/other types are hidden).
 function ANx.BindAllowed(itemId)
@@ -348,11 +421,57 @@ function ANx.BindAllowed(itemId)
     return true
 end
 
+-- ---------------------------------------------------------------------
+-- Item faction ("A"/"H"/nil) - static seed first, else read the item's
+-- race restriction from its tooltip (covers raid/dungeon drops the vendor
+-- seed doesn't have, e.g. faction-locked Trial of the Crusader loot).
+-- ---------------------------------------------------------------------
+local ALLIANCE_RACES = { "Human", "Dwarf", "Night Elf", "Gnome", "Draenei", "Worgen" }
+local HORDE_RACES    = { "Orc", "Scourge", "Undead", "Tauren", "Troll", "Blood Elf", "Goblin" }
+local factionCache = {}
+local factionTip
+
+function ANx.InvalidateFactionCache()
+    factionCache = {}
+end
+
+function ANx.ItemFactionOf(itemId)
+    local c = factionCache[itemId]
+    if c ~= nil then return c or nil end          -- false = resolved, neutral/unknown
+    local seed = ANx.ItemFaction and ANx.ItemFaction[itemId]
+    if seed then factionCache[itemId] = seed; return seed end
+    if not CreateFrame then return nil end
+    if not factionTip then
+        factionTip = CreateFrame("GameTooltip", "AttuneNextFactionTip", nil, "GameTooltipTemplate")
+        factionTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    end
+    factionTip:ClearLines()
+    local ok = pcall(factionTip.SetHyperlink, factionTip, "item:" .. itemId)
+    if not ok then return nil end
+    local n = factionTip:NumLines()
+    if not n or n == 0 then return nil end        -- not cached yet; retry later
+    local result = false
+    for i = 1, n do
+        local fs = _G["AttuneNextFactionTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        if t then
+            local a, h = 0, 0
+            for _, r in ipairs(ALLIANCE_RACES) do if t:find(r, 1, true) then a = a + 1 end end
+            for _, r in ipairs(HORDE_RACES) do if t:find(r, 1, true) then h = h + 1 end end
+            -- a faction race-restriction line lists that faction's races only
+            if a >= 3 and h == 0 then result = "A"; break
+            elseif h >= 3 and a == 0 then result = "H"; break end
+        end
+    end
+    factionCache[itemId] = result
+    return result or nil
+end
+
 -- Item-level faction gate. Neutral items always pass.
 function ANx.FactionAllowed(itemId)
     local fac = ANx.db and ANx.db.faction
     if not fac or fac == "both" then return true end
-    local itf = ANx.ItemFaction and ANx.ItemFaction[itemId]
+    local itf = ANx.ItemFactionOf(itemId)
     if not itf then return true end
     return itf == fac
 end

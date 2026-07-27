@@ -88,9 +88,13 @@ function Engine.ExportCache()
     local sums = {}
     for exp, sum in pairs(summaryCache) do
         if sum.ready then
+            local dl, rl = {}, {}
+            for label, set in pairs(sum.Dl or {}) do dl[label] = SetToArray(set) end
+            for label, set in pairs(sum.Rl or {}) do rl[label] = SetToArray(set) end
             sums[exp] = {
                 D = SetToArray(sum.D), R = SetToArray(sum.R), Q = SetToArray(sum.Q),
                 W = SetToArray(sum.W), V = SetToArray(sum.V), C = SetToArray(sum.C),
+                Dl = dl, Rl = rl,
             }
         end
     end
@@ -116,9 +120,13 @@ function Engine.ImportCache()
     zoneCache = sc.zones or {}
     summaryCache = {}
     for exp, sum in pairs(sc.summaries or {}) do
+        local dl, rl = {}, {}
+        for label, arr in pairs(sum.Dl or {}) do dl[label] = ArrayToSet(arr) end
+        for label, arr in pairs(sum.Rl or {}) do rl[label] = ArrayToSet(arr) end
         summaryCache[exp] = {
             D = ArrayToSet(sum.D or {}), R = ArrayToSet(sum.R or {}), Q = ArrayToSet(sum.Q or {}),
             W = ArrayToSet(sum.W or {}), V = ArrayToSet(sum.V or {}), C = ArrayToSet(sum.C or {}),
+            Dl = dl, Rl = rl,
             ready = true,
         }
     end
@@ -129,6 +137,8 @@ end
 function Engine.ForceRescan()
     if ANx.db then ANx.db.structCache = nil end
     if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
+    if ANx.InvalidateAccessoryCache then ANx.InvalidateAccessoryCache() end
+    if ANx.InvalidateFactionCache then ANx.InvalidateFactionCache() end
     Engine.InvalidateAll()
 end
 
@@ -345,6 +355,7 @@ function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
+    if not ANx.AccessoryAllowed(itemId) then return false end
     return true
 end
 
@@ -807,13 +818,18 @@ local function AddSet(set, ids)
 end
 
 local function BuildSummary(exp)
-    local sum = { D = {}, R = {}, Q = {}, W = {}, V = {}, C = {} }
+    local sum = { D = {}, R = {}, Q = {}, W = {}, V = {}, C = {},
+                  -- per-difficulty-label dungeon/raid sets (for the difficulty/size filters)
+                  Dl = {}, Rl = {} }
     -- dungeons + raids
     for _, kind in ipairs({ "D", "R" }) do
+        local labelSets = (kind == "D") and sum.Dl or sum.Rl
         for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
             for _, d in ipairs(Engine.InstanceDiffs(inst)) do
                 Engine.MaybeYield()
                 AddSet(sum[kind], d.items)
+                labelSets[d.label] = labelSets[d.label] or {}
+                AddSet(labelSets[d.label], d.items)
             end
         end
     end
@@ -871,4 +887,116 @@ function Engine.UnionStats(sets, key)
     local r = Engine.SetStats(union)
     if key then statsCache[key] = r end
     return r
+end
+
+-- The item set for a content category in a summary, honoring the difficulty
+-- and raid-size filters for dungeons (D) and raids (R). Others ignore them.
+function Engine.ContentSet(sum, cat)
+    if not sum then return {} end
+    if (cat == "D" or cat == "R") and ANx.DifficultyFilterActive() then
+        local labelSets = (cat == "D") and sum.Dl or sum.Rl
+        local union = {}
+        if labelSets then
+            for label, set in pairs(labelSets) do
+                if ANx.DifficultyMatches(label) then
+                    for id in pairs(set) do union[id] = true end
+                end
+            end
+        end
+        return union
+    end
+    return sum[cat] or {}
+end
+
+-- All six content sets for a summary (difficulty-adjusted) - for expansion totals.
+function Engine.AllContentSets(sum)
+    return {
+        Engine.ContentSet(sum, "D"), Engine.ContentSet(sum, "R"),
+        sum.Q or {}, sum.W or {}, sum.V or {}, sum.C or {},
+    }
+end
+
+-- ---------------------------------------------------------------------
+-- Context items (for the Random button) - the item universe for a view
+-- ---------------------------------------------------------------------
+local ZONEMODE_CAT = { Q = "Q", W = "W", V = "V" }
+
+local function AddSetToList(list, seen, set)
+    for id in pairs(set) do
+        if type(id) == "number" and not seen[id] then seen[id] = true; list[#list + 1] = id end
+    end
+end
+
+local function AddListToList(list, seen, arr)
+    for _, id in ipairs(arr) do
+        if not seen[id] then seen[id] = true; list[#list + 1] = id end
+    end
+end
+
+-- Returns the list of item ids relevant to the current view (its "context").
+function Engine.ContextItems(view)
+    local list, seen = {}, {}
+    if not view then return list end
+    local t = view.type
+
+    if t == "items" then
+        AddListToList(list, seen, view.items or {})
+        return list
+    elseif t == "sources" then
+        if view.itemId then list[1] = view.itemId end
+        return list
+    elseif t == "quests" then
+        local zc = view.zoneEntry and Engine.ZoneData(view.zoneEntry)
+        if zc then AddListToList(list, seen, zc.quest) end
+        return list
+    elseif t == "currencies" or t == "vendors" then
+        local zc = view.zoneEntry and Engine.ZoneData(view.zoneEntry)
+        if zc then AddListToList(list, seen, zc.vendor) end
+        return list
+    elseif t == "events" then
+        AddListToList(list, seen, Engine.AllEventItems())
+        return list
+    elseif t == "instances" then
+        local s = summaryCache[view.exp]
+        if s then AddSetToList(list, seen, Engine.ContentSet(s, view.kind)) end
+        return list
+    elseif t == "zones" then
+        local cat = ZONEMODE_CAT[view.mode]
+        local s = summaryCache[view.exp]
+        if s and cat then AddSetToList(list, seen, s[cat] or {}) end
+        return list
+    elseif t == "profs" then
+        local s = summaryCache[view.exp]
+        if s then AddSetToList(list, seen, s.C or {}) end
+        return list
+    elseif t == "content" then
+        local s = summaryCache[view.exp]
+        if s then for _, set in ipairs(Engine.AllContentSets(s)) do AddSetToList(list, seen, set) end end
+        return list
+    elseif t == "contentExp" then
+        -- a content type chosen, no expansion yet: union that content across expansions
+        for exp = 1, 3 do
+            local s = summaryCache[exp]
+            if s then AddSetToList(list, seen, Engine.ContentSet(s, view.content)) end
+        end
+        return list
+    end
+
+    -- root / home / contentTypes / anything else: the whole known universe
+    AddListToList(list, seen, Engine.Universe())
+    AddListToList(list, seen, Engine.AllEventItems())
+    return list
+end
+
+-- A random eligible, unattuned, obtainable item from the view's context (or nil).
+function Engine.RandomUnattuned(view)
+    local items = Engine.ContextItems(view)
+    local pool = {}
+    for _, id in ipairs(items) do
+        if Engine.Eligible(id) and not ANx.CountDone(id) and #Engine.Sources(id) > 0 then
+            pool[#pool + 1] = id
+        end
+    end
+    if #pool == 0 then return nil end
+    return pool[math.random(#pool)], #pool
 end

@@ -24,7 +24,15 @@ There's also a **minimap button** (the book icon): **left-click** to open the pl
 
 ## The basics
 
-Type **`/an`** to open or close the window. You'll see three expansions plus an events category:
+Type **`/an`** to open or close the window. The first screen asks how you want to browse:
+
+- **Filter by Expansion** — pick Classic / TBC / WotLK first, then a content type. (The classic flow.)
+- **Filter by Content Type** — pick the content type first (Dungeons, Raids, Quests, …), then the expansion. Handy when you just want, say, "all the raids I still need."
+- **Events & Holidays** — seasonal event gear (see below).
+
+Either way you end up at the same item lists. There's also a **Random** button (top of the window) that jumps you to a random unattuned item to go get — it's context-sensitive (see below).
+
+Under **Filter by Expansion** you'll see three expansions plus events:
 
 - **Classic**
 - **The Burning Crusade**
@@ -52,6 +60,15 @@ The final screen is always a list of the actual items left, **sorted by drop rat
 - **Shift-click** it to link it in chat.
 - **Hover** for the normal item tooltip.
 
+### The Random button
+
+The **Random** button (top of the window) picks a random unattuned item you can obtain and takes you straight to its detail page (where it drops, drop rates, cost, etc.). It's **context-sensitive** — it picks from whatever you're currently looking at, and respects all your active filters:
+
+- On **Classic → Crafting** it gives a random Classic crafted item; drill into **Leatherworking** first and it's a random Classic leatherworking item.
+- Under **Filter by Content Type → Quests** (before choosing an expansion) it gives a random quest-reward item from any expansion.
+- On a specific dungeon, zone, vendor, or event it picks from that place.
+- On the very first screen it picks from everything you still need.
+
 ### Searching for a specific item
 
 There's a **Search** box under the toolbar, available on every screen. Type part of an item's name and AttuneNext lists every attunable item that matches, with its best source right on the row. Click a result to jump straight to its detail page — where it drops (every source and drop rate), its attune progress, and its vendor cost if it has one. Clear the box to go back to where you were.
@@ -68,10 +85,13 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 ## The toolbar (buttons under the title)
 
 - **Attunes: Character / Account** — switch between *what this character can attune* (the default) and *your whole account*. Character scope respects your class, armor type, and level; account scope counts an item as done if **any** of your characters has attuned any version of it.
-- **Faction: Both / Alliance / Horde** — hide content locked to the other faction. Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
+- **Faction: Both / Alliance / Horde** — hide content locked to the other faction (faction-locked quests, vendors and gear, including raid/dungeon drops read from the item tooltip). Affects faction-only quests, faction vendors, and faction-restricted gear (heirlooms, tabards, PvP sets, etc.). Neutral content always shows.
 - **Sort** — cycles the current list: Default → Name → Attuned % → Attunes Left → **Distance** (on item lists: Drop % → Name → Progress → Distance). *Distance* puts things in or near your current zone first (same zone, then same continent, then the rest), so it surfaces what you can go do right now. Your choice is remembered per screen.
 - **Show** (forge target) — sets a forge target and everything follows it. Pick a tier and an item counts as "left" until it's pushed **past** that tier; the **Left** number on every screen updates to match. *Unattuned* (default) = only truly unattuned items are left; *Warforged* = everything that isn't Lightforged yet is left; *Lightforged* = everything is left (nothing is beyond it). Item lists show exactly those "left" items, with forged ones tagged TF / WF / LF. (This replaces the old "Show attuned items" checkbox.)
 - **Bind** — a global filter (Both / BoP only / BoE only) that updates the counts at every level, so you can see, e.g., how many Bind-on-Equip pieces each dungeon still has without drilling in. Bind type is read from the item (built-in for vendor gear, from the tooltip otherwise); an item that isn't cached yet may not classify until you've seen it once, and Rescan re-checks after items cache.
+- **Difficulty** — on dungeon/raid screens (available before you pick a specific instance). Cycles All / Normal / Heroic / Mythic and adjusts the counts at every level — so you can see, e.g., only your Heroic totals. On a dungeon this collapses each entry to the matching difficulty.
+- **Size** — on raid screens, alongside Difficulty. Cycles All / 10-man / 25-man to filter out the size you don't want. Combine them (Heroic + 25) to see only 25-man Heroic. Dungeons and single-difficulty raids ignore it.
+- **Accessories** — a global On/Off toggle. Cloaks, rings, necklaces and trinkets aren't restricted by armor type, so *any* of your characters can attune them account-wide. Turn Accessories **Off** to hide those and focus each character on the class-specific gear (armor of its type and its weapons) — the counts at every level drop accordingly. (Built-in for vendor gear, from the item's equip slot otherwise; uncached items are assumed non-accessory and re-checked on Rescan.)
 - **Zone-exclusive only** — a global toggle. When On, every level only counts and shows items that drop **nowhere but a single zone** — so you can see, right from the dungeon/zone list, how many exclusive items each place still has without clicking in. Great for prioritising a lockout.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 - **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
@@ -129,6 +149,18 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v2.8.1**
+- Fixed the **Faction** filter missing raid/dungeon drops: it now reads an item's Alliance/Horde race restriction from the tooltip when it isn't in the built-in vendor data, so faction-locked raid loot (e.g. Trial of the Crusader's Alliance items) is correctly hidden under the opposite faction. (Needs the item cached, like the Bind filter; Rescan re-checks.)
+- Fixed the **Random** button erroring on live realms (`math.randomseed` doesn't exist in the WoW client).
+
+**v2.8.0**
+- The main menu now starts with **Filter by Expansion** and **Filter by Content Type** — the second lets you pick the content type first (e.g. all Raids) and then the expansion.
+- Added a **Difficulty** filter (All / Normal / Heroic / Mythic) and a **Size** filter (All / 10-man / 25-man) for dungeons and raids, available from any dungeon/raid selection screen. Both adjust the counts at every level; raids can combine tier + size (e.g. Heroic 25).
+- Added a context-sensitive **Random** button that jumps to a random unattuned item to obtain, picked from whatever you're currently browsing and respecting your active filters.
+
+**v2.7.0**
+- Added an **Accessories** On/Off toggle. Cloaks, rings, necklaces and trinkets can be attuned by any character account-wide, so turning this off hides them and lets each character focus on its class-specific gear. It's global — the counts update at every level. Reorganized the toolbar into three compact rows to fit and brought the window width back down.
 
 **v2.6.1**
 - The **Bind** filter is now global — it updates the counts at every level of the menu (not just the final item list), so you can see each dungeon/zone/vendor's BoP or BoE totals from the list.
