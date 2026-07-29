@@ -155,6 +155,11 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v2.11.1**
+- **Profession screens now show crafted items only.** Some items sit in the profession data because a quest *requires* the profession (e.g. the Light's Hope Chapel "Polar Tunic/Gloves/Bracers" turn-ins need Leatherworking 300) — those were wrongly listed on the crafting screens with a skill level. They now appear only under Quests, where they're actually obtained.
+- **Items nobody can attune are excluded everywhere.** If the server flags an item as not attunable at all (the tooltip's "Can't be Attuned" note), it no longer counts or shows in any list, even if the per-character check disagrees.
+- The item detail page now shows a red note when an item **can't be attuned by anyone** or is **not attunable by this character** (wrong class/armor/faction), so an ineligible recommendation is visible at a glance.
+
 **v2.11.0**
 - **Fixed missing event gear and added Noblegarden.** Some holiday gear drops from a loot *object* rather than the boss itself — e.g. Frost Lord Ahune's cloaks come from his **Ice Chest**, and Noblegarden's **Spring Circlet** comes from **Brightly Colored Eggs** — and those weren't being picked up. AttuneNext now reads gameobject loot too (including the heroic Ice Chest), added **Noblegarden** as an event, and ships a verified backbone list of each event's attunable gear so nothing slips through. Every event was reviewed: Hallow's End (Headless Horseman), Brewfest (Coren Direbrew), Midsummer (Ahune), Love is in the Air (Apothecary Hummel), Lunar Festival, and Noblegarden.
 

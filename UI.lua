@@ -1254,6 +1254,11 @@ builders["sources"] = function(view)
     if ANx.AccountHasVariant(itemId) and progress < 100 then
         headParts[#headParts + 1] = "|cff00ccffaccount has a variant|r"
     end
+    if not ANx.IsAttunableAtAll(itemId) then
+        headParts[#headParts + 1] = "|cffff6060can't be attuned by anyone|r"
+    elseif not ANx.CanCharAttune(itemId) then
+        headParts[#headParts + 1] = "|cffff6060not attunable by this character (class/armor/faction)|r"
+    end
     local cost = ANx.CostString(itemId)
     if cost then headParts[#headParts + 1] = cost end
 
@@ -1340,11 +1345,19 @@ builders["search"] = function(view)
         for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
     end
 
-    local matches = {}
+    -- name matches, split by whether they pass the active filters (the same gate
+    -- the item lists use) so search stays consistent with the rest of the addon:
+    -- faction, bind, accessories, zone-exclusive, scope (can this char/account
+    -- attune it) and the Show/forge tier.
+    local matches, hidden = {}, 0
     for _, id in ipairs(universe) do
         local name = ANx.GetItemDisplay(id)
         if name and name:lower():find(q, 1, true) then
-            matches[#matches + 1] = { id = id, name = name }
+            if Engine.Eligible(id) and ANx.ForgeAllowed(id) then
+                matches[#matches + 1] = { id = id, name = name }
+            else
+                hidden = hidden + 1
+            end
         end
     end
 
@@ -1370,7 +1383,6 @@ builders["search"] = function(view)
         local name, _, quality, tex = ANx.GetItemDisplay(m.id)
         local chance, srcName, srcType, _, zone = Engine.BestSource(m.id)
         local attuned = ANx.CountAttuned(m.id)
-        local canC = ANx.CanCount(m.id)
         local rightText
         if attuned then rightText = "|cff00ff00Attuned|r"
         elseif chance and chance > 0 then rightText = "|cff00ff88" .. ANx.FormatChance(chance) .. "|r"
@@ -1380,7 +1392,6 @@ builders["search"] = function(view)
             subParts[#subParts + 1] = SrcTypeLabel(srcType) .. ": " .. srcName
                 .. (zone and zone ~= "" and (" (" .. zone .. ")") or "")
         end
-        if not canC then subParts[#subParts + 1] = "|cffff6060other faction/class|r" end
         AddRow({
             text = QualityHex(quality or 1) .. name .. "|r",
             sub = table.concat(subParts, "  "),
@@ -1394,11 +1405,20 @@ builders["search"] = function(view)
     if shown == 0 then
         if not ready then
             AddRow({ text = "|cff888888Indexing items in the background - try again in a moment...|r" })
+        elseif hidden > 0 then
+            AddRow({ text = "|cffff8040" .. hidden .. " item(s) match \"" .. q
+                .. "\" but are hidden by your current filters (faction, bind, scope, Show, etc.).|r",
+                sub = "Widen a filter to see them." })
         else
             AddRow({ text = "|cff888888No attunable items match \"" .. q .. "\"|r" })
         end
-    elseif #matches > CAP then
-        AddRow({ text = "|cff888888...and " .. (#matches - CAP) .. " more - type more letters to narrow it down|r" })
+    else
+        if #matches > CAP then
+            AddRow({ text = "|cff888888...and " .. (#matches - CAP) .. " more - type more letters to narrow it down|r" })
+        end
+        if hidden > 0 then
+            AddRow({ text = "|cff888888(" .. hidden .. " more match but are hidden by your current filters)|r" })
+        end
     end
 end
 

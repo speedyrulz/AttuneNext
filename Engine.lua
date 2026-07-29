@@ -491,22 +491,41 @@ end
 -- ---------------------------------------------------------------------
 -- Professions
 -- ---------------------------------------------------------------------
+-- A profession screen lists CRAFTED items. Some entries in the profession data
+-- merely REQUIRE the profession (e.g. the Light's Hope Chapel "Polar Tunic"
+-- quests need Leatherworking 300): their loot-DB source is a quest, not a craft
+-- spell, so they belong under Quests, not under Crafting.
+function Engine.IsCraftObtained(itemId)
+    local sources = Engine.Sources(itemId)
+    if #sources == 0 then return true end   -- loot DB gap: benefit of the doubt
+    for _, s in ipairs(sources) do
+        if s.srcType == ANx.SRC.CRAFT_TRAINER or s.srcType == ANx.SRC.CRAFT_RECIPE then
+            return true
+        end
+    end
+    return false
+end
+
 function Engine.ProfessionEntries(prof, exp)
     local key = prof .. "-" .. exp
     local c = profCache[key]
     if c then return c end
     c = {}
+    local dbReady = ANx.LootDbLoaded()
     local rows = ANx.ProfessionItems and ANx.ProfessionItems[prof]
     if rows then
         for _, row in ipairs(rows) do
             local itemId, spellId, skill, rowExp = row[1], row[2], row[3], row[4]
-            if rowExp == exp and ANx.IsAttunableAtAll(itemId) then
+            if rowExp == exp and ANx.IsAttunableAtAll(itemId)
+                and Engine.IsCraftObtained(itemId) then
                 c[#c + 1] = { id = itemId, spell = spellId, skill = skill }
             end
         end
         table.sort(c, function(a, b) return a.skill < b.skill end)
     end
-    profCache[key] = c
+    -- don't cache a pre-loot-DB view: sources are empty then, so the craft
+    -- filter can't tell crafts from quest turn-ins yet
+    if dbReady then profCache[key] = c end
     return c
 end
 

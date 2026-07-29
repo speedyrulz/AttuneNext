@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.11.0"
+ANx.VERSION = "2.11.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -277,8 +277,11 @@ end
 --   char scope    -> current character can attune it (class/armor/level)
 --   account scope -> item is attunable by someone on the account
 function ANx.CanCount(itemId)
+    -- an item nobody can attune never counts, whatever the char helper claims
+    -- (the server tooltip and CanAttuneItemHelper can disagree on e.g. armor type)
+    if not ANx.IsAttunableAtAll(itemId) then return false end
     if ANx.db and ANx.db.scope == "account" then
-        return ANx.IsAttunableAtAll(itemId)
+        return true
     end
     return ANx.CanCharAttune(itemId)
 end
