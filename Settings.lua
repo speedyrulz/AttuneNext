@@ -11,6 +11,13 @@ local minimapButton
 -- ---------------------------------------------------------------------
 -- Interface Options panel
 -- ---------------------------------------------------------------------
+-- lets the in-addon Options screen refresh this panel when both are open
+function ANx.SyncOptionsPanel()
+    if panel and panel.refresh and panel.IsShown and panel:IsShown() then
+        panel.refresh()
+    end
+end
+
 local function BuildPanel()
     if panel then return end
     panel = CreateFrame("Frame", "AttuneNextOptionsPanel", InterfaceOptionsFramePanelContainer)
@@ -45,71 +52,147 @@ local function BuildPanel()
     end)
     controls.scale = scale
 
-    -- checkbox helper
-    local function MakeCheck(name, label, anchor, dy, getter, setter)
+    -- checkbox helper: fixed x per column so the boxes always line up
+    local function MakeCheck(name, label, x, y, getter, setter)
         local cb = CreateFrame("CheckButton", "AttuneNext" .. name .. "Check", panel,
             "InterfaceOptionsCheckButtonTemplate")
-        cb:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", -2, dy or -12)
+        cb:SetPoint("TOPLEFT", x, y)
         local txt = _G[cb:GetName() .. "Text"]
         if txt then txt:SetText(label) end
         cb.tooltipText = label
         cb:SetScript("OnClick", function(self)
             setter(self:GetChecked() and true or false)
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
         end)
         cb._getter = getter
         return cb
     end
 
-    controls.minimap = MakeCheck("Minimap", "Show minimap button", scale, -20,
+    -- ------------- left column: general -------------
+    local genHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    genHdr:SetPoint("TOPLEFT", 16, -118)
+    genHdr:SetText("General")
+
+    local LX, LY, STEP = 16, -140, -26
+    controls.minimap = MakeCheck("Minimap", "Show minimap button", LX, LY,
         function() return ANx.db.minimapShow end,
         function(v) ANx.db.minimapShow = v; ANx.UpdateMinimapButton() end)
-
-    controls.debug = MakeCheck("Debug", "Debug logging (chat)", controls.minimap, -4,
+    controls.tooltip = MakeCheck("Tooltip", "Attunement info on item tooltips", LX, LY + STEP,
+        function() return ANx.db.tooltip end,
+        function(v) ANx.db.tooltip = v end)
+    controls.alerts = MakeCheck("Alerts", "Alert on needed drops / rolls / finished attunes", LX, LY + STEP * 2,
+        function() return ANx.db.alerts end,
+        function(v) ANx.db.alerts = v end)
+    controls.zonewatch = MakeCheck("ZoneWatch", "Zone-entry chat note (attunables left here)", LX, LY + STEP * 3,
+        function() return ANx.db.zonewatch end,
+        function(v) ANx.db.zonewatch = v end)
+    controls.zonehud = MakeCheck("ZoneHud", "In-instance HUD window of what's left", LX, LY + STEP * 4,
+        function() return ANx.db.zoneHud end,
+        function(v) ANx.db.zoneHud = v; if ANx.ZoneWatchNow then ANx.ZoneWatchNow(false) end end)
+    controls.goalhud = MakeCheck("GoalHud", "On-screen goal progress window", LX, LY + STEP * 5,
+        function() return ANx.db.goalHud end,
+        function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
+    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 6,
         function() return ANx.debug end,
         function(v) ANx.debug = v end)
 
-    -- buttons
-    local function MakeButton(label, anchor, dx, dy, onClick)
-        local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-        b:SetWidth(150); b:SetHeight(22)
-        b:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", dx or 0, dy or -16)
+    -- ------------- right column: the AttuneNext button -------------
+    local anHdr = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    anHdr:SetPoint("TOPLEFT", 330, -118)
+    anHdr:SetText("The AttuneNext button")
+
+    local RX, RY = 330, -140
+    controls.ctx = MakeCheck("Ctx", "Context sensitive (current screen)", RX, RY,
+        function() return ANx.db.anext.context end,
+        function(v) ANx.db.anext.context = v end)
+    controls.focus = MakeCheck("Focus", "Focus the place with the most left", RX, RY + STEP,
+        function() return ANx.db.anext.focus end,
+        function(v) ANx.db.anext.focus = v end)
+    controls.droprate = MakeCheck("DropRate", "Factor in drop rates", RX, RY + STEP * 2,
+        function() return ANx.db.anext.dropRate end,
+        function(v) ANx.db.anext.dropRate = v end)
+    local runBtn = CreateFrame("Button", "AttuneNextRunModeBtn", panel, "UIPanelButtonTemplate")
+    runBtn:SetWidth(268); runBtn:SetHeight(22)
+    runBtn:SetPoint("TOPLEFT", RX + 2, RY + STEP * 3 - 2)
+    runBtn:SetScript("OnClick", function(self)
+        local c = ANx.RunMode()
+        for i, m in ipairs(ANx.RUN_MODES) do
+            if m == c then ANx.db.anext.instance = ANx.RUN_MODES[(i % #ANx.RUN_MODES) + 1]; break end
+        end
+        self:SetText("Recommend whole run: " .. (ANx.RUN_MODE_LABELS[ANx.RunMode()] or "?"))
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end)
+
+    local anNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    anNote:SetPoint("TOPLEFT", RX + 4, RY + STEP * 4 - 10)
+    anNote:SetWidth(270); anNote:SetJustifyH("LEFT")
+    anNote:SetText("|cff888888The category you're browsing always wins - on a Quests / Vendor / Profession screen the pick comes from it.|r")
+
+    local function IgnoreCount()
+        local n = 0
+        for _ in pairs((ANx.db.anext and ANx.db.anext.ignore) or {}) do n = n + 1 end
+        for _ in pairs((ANx.db.anext and ANx.db.anext.ignoreInst) or {}) do n = n + 1 end
+        return n
+    end
+
+    -- ------------- bottom action row -------------
+    local function MakeButton(name, label, x, w, onClick)
+        local b = CreateFrame("Button", name, panel, "UIPanelButtonTemplate")
+        b:SetWidth(w); b:SetHeight(22)
+        b:SetPoint("BOTTOMLEFT", x, 46)
         b:SetText(label)
         b:SetScript("OnClick", onClick)
         return b
     end
 
-    local openBtn = MakeButton("Open AttuneNext", controls.debug, 0, -20, function()
+    MakeButton(nil, "Open AttuneNext", 16, 138, function()
         if ANx.UI then ANx.UI.Show(false) end
         if InterfaceOptionsFrame then InterfaceOptionsFrame:Hide() end
     end)
-
-    local rescanBtn = MakeButton("Rescan loot DB", openBtn, 160, 0, function()
+    MakeButton(nil, "Rescan loot DB", 160, 138, function()
         if ANx.Engine then ANx.Engine.ForceRescan() end
         ANx.Print("Manual rescan started.")
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end)
-
-    local resetBtn = MakeButton("Reset filters", openBtn, 0, -8, function()
-        ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 0
+    MakeButton(nil, "Reset filters", 304, 138, function()
+        ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 1
         ANx.db.zoneExclusive = false; ANx.db.stockFilter = "all"
         ANx.db.vendorFilter = "all"; ANx.db.raresOnly = false; ANx.db.sort = {}
         if ANx.Engine then ANx.Engine.InvalidateStats() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
         ANx.Print("Filters reset to defaults.")
     end)
+    local hudBtn = MakeButton("AttuneNextHudResetBtn", "Reset HUD size/pos", 448, 150, function()
+        if ANx.ResetHudLayout then ANx.ResetHudLayout() end
+    end)
+
+    local ignoreBtn = MakeButton("AttuneNextIgnoreResetBtn", "Reset ignore list", 0, 160, function(self)
+        ANx.db.anext.ignore = {}
+        ANx.db.anext.ignoreInst = {}
+        ANx.Print("AttuneNext ignore list cleared.")
+        self:SetText("Reset ignore list (0)")
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end)
+    ignoreBtn:ClearAllPoints()
+    ignoreBtn:SetPoint("TOPLEFT", anNote, "BOTTOMLEFT", -2, -12)
 
     local help = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    help:SetPoint("TOPLEFT", resetBtn, "BOTTOMLEFT", 0, -20)
-    help:SetWidth(420); help:SetJustifyH("LEFT")
-    help:SetText("|cff888888Minimap button: left-click to open, right-click for these settings. "
-        .. "Drag it around the minimap to reposition.|r")
+    help:SetPoint("BOTTOMLEFT", 16, 16)
+    help:SetWidth(590); help:SetJustifyH("LEFT")
+    help:SetText("|cff888888Minimap button: left-click opens the window, right-click opens these settings, drag to move it. /an hud toggles the instance HUD.|r")
 
-    -- sync control states from saved variables
+    -- sync control states from saved variables (also called when the addon's
+    -- own Options screen changes something, so the two menus mirror)
     panel.refresh = function()
         scale:SetValue(ANx.db and ANx.db.scale or 1)
-        for _, cb in pairs({ controls.minimap, controls.debug }) do
+        for _, cb in pairs({ controls.minimap, controls.tooltip, controls.alerts,
+                             controls.zonewatch, controls.zonehud, controls.goalhud,
+                             controls.debug, controls.ctx, controls.focus,
+                             controls.droprate }) do
             cb:SetChecked(cb._getter() and true or false)
         end
+        runBtn:SetText("Recommend whole run: " .. (ANx.RUN_MODE_LABELS[ANx.RunMode()] or "?"))
+        ignoreBtn:SetText("Reset ignore list (" .. IgnoreCount() .. ")")
     end
     panel.okay = function() end
     panel.cancel = function() end
@@ -154,8 +237,13 @@ local function BuildMinimapButton()
     local icon = b:CreateTexture(nil, "BACKGROUND")
     icon:SetWidth(20); icon:SetHeight(20)
     icon:SetPoint("CENTER", 0, 1)
-    icon:SetTexture("Interface\\Icons\\INV_Misc_Book_11")
-    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    if ANx.Art and ANx.Art.emblem and ANx.SetArt then
+        ANx.SetArt(icon, "emblem")
+        icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+    else
+        icon:SetTexture("Interface\\Icons\\INV_Misc_Book_11")
+        icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    end
 
     local border = b:CreateTexture(nil, "OVERLAY")
     border:SetWidth(53); border:SetHeight(53)

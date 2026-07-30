@@ -73,15 +73,38 @@ The **AttuneNext** button (top of the window) jumps you to a recommended item to
 
 All of these respect your active filters (faction, forge target, difficulty, bind, accessories, etc.). Whatever item it gives you, the detail page has an **Ignore this item** button — handy if the "best" pick is a rare spawn or seasonal boss you'd rather skip; it drops that item from future picks. Use **Reset the ignore list** in the Opt menu to clear every skipped item and run at once.
 
-### Searching for a specific item
+### Searching
 
-There's a **Search** box under the toolbar, available on every screen. Type part of an item's name and AttuneNext lists every attunable item that matches, with its best source right on the row. Click a result to jump straight to its detail page — where it drops (every source and drop rate), its attune progress, and its vendor cost if it has one. Clear the box to go back to where you were.
+There's a **Search** box under the toolbar, available on every screen, with a **Filters On/Off** button that decides whether results respect your active filters (turn it Off to find things your faction/bind/difficulty filters would hide), and a **Find** button that switches what you're searching: **Attunables** (default — items by name), **Vendors** (by vendor name), **Dungeons**, **Raids**, **Professions**, or **Quests**. Searching a name jumps you straight to the right screen — a dungeon result opens that dungeon's item list (one result per difficulty), a vendor result drops the waypoint arrow and opens their stock, a quest result sets the arrow and opens its rewards — no clicking through menus. Item results open the detail page with every source and drop rate. Clear the box to go back to where you were.
+
+### The v3 look
+
+The window uses a dark panel dressed in the **painted AttuneNext art pack** (art by Jeff): an ornate painted border and corners, the AttuneNext **emblem and wordmark** in the left sidebar, painted buttons, and **painted thumbnails for all 74 dungeons and raids** plus custom icons for every expansion, content type, profession, event and navigation entry. The **top bar** carries the painted **AttuneNext wordmark** on the left, the **search field at the very top** (painted, with a magnifier and a "Search" hint) with its **Find:** type selector and **Filters:** toggle right beside it, and the **AttuneNext** button plus **gear** (AttuneNext options) and **refresh** (rescan) icon buttons at the top right. Below it, every filter is a **uniform painted chip** — one shared size per screen, in balanced rows that always fill the frame edge-to-edge — showing its **current value first** ("Character", "Horde", "Unattuned", "Both binds"...) in **its own color with a matching pack icon**, with a hover tooltip explaining what each chip cycles. The **left sidebar** — Home, Browse, What's Left, Favorites, Goals — jumps between sections from anywhere: the emblem sits alone up top, entries are roomy rows with large icons and left-aligned labels, and only the active section wears the teal-outlined chip, a **breadcrumb path** shows where you are, and every row carries a **teal progress bar** (gold when complete) under its text. Item and material icons come from the game client itself. The minimap button wears the emblem too.
+
+### Favorites & getting around
+
+- A **Home** button (top left) returns to the main menu from any screen.
+- The **Fav +** button (top left) saves the current screen **together with your active filters** as a favorite; on a screen that's already saved with those filters it reads **Fav -** and removes it. The main menu's **Favorites** entry lists everything saved — each shows its filter set, **click** jumps straight to that page with those filters re-applied, **shift-click** removes it.
+
+### What's Left? (totals-only report)
+
+The main menu's **What's Left?** entry opens a deliberately simple report — every number on it is a *remaining* total, never "attuned" counts or percentages:
+
+- **Attunes left** for **this character** and for the **account**, side by side. Click either to break the number down by expansion and content type (again, remaining counts only); click any row there to jump into the normal browser with its full filters.
+- **Crafted items left** (character / account). Click it for the **raw materials** still needed to craft everything remaining — each with a character column and an account column, sorted by biggest need. Click a profession to see just its materials, and click any material to see **which remaining items need it**. The numbers are true *raw* materials: craftable parts are broken down the whole chain (a Mithril Casing becomes bars, bars become ore), and everything the current character already has — **bags, bank and resource bank** — is subtracted at every level. So if you need 2 casings and hold 1 casing and 1 bar, the list just says *2 Mithril Ore*.
+- **Currency needed to buy out everything left** — each currency with the character/account totals and how much you currently have. Click a currency for the list of remaining items it buys.
+
+Reagent lists for all eleven professions are built in (from the 3.3.5a client craft data), so the materials calculator works out of the box. Synastria-custom recipes aren't in that data — AttuneNext records those whenever you open a profession's crafting window (on any character, shared account-wide), and the materials screen says how many remaining recipes are still missing data.
+
+The report respects your Faction / Bind / Accessories / Zone-exclusive filters. It counts base attunes (the forge target doesn't change it).
 
 ### Waypoint arrows
 
-- On a **quest** screen, clicking a quest points an arrow at its quest giver. If you can't pick the quest up yet, the arrow points at the **next quest in the chain** you *can* do, and chat tells you what unlocks what.
+- On a **quest** screen, clicking a quest points an arrow at its quest giver. If you can't pick the quest up yet, the arrow points at the **next quest in the chain** you *can* do, and chat tells you what unlocks what. Quests that **start from a dropped item** arrow to the creature or chest that drops the starter instead.
+- Under **Attunes: Character**, quests your character's race/class can never complete are hidden from quest lists (switch to Account scope to see them all).
 - On any **item's detail page** (including whatever AttuneNext recommends), a quest listed under **Sources** is clickable too — same arrow, same chain redirect, with a **[chain]** / **[in log]** / **[done]** tag showing its state.
 - On a **vendor** screen, clicking a vendor points an arrow at that vendor.
+- On an item's detail page, a **[rare]**-tagged source is clickable: the arrow points at the rare's spawn point, and clicking again **cycles through its other camps**.
 
 Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither installed, AttuneNext just prints the location and coordinates in chat. Rows that have a known location show a small green `>`.
 
@@ -154,6 +177,30 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v3.0.0**
+
+*What's still needed*
+- New **What's Left** section: a dashboard of everything you still need — attunes left, crafted items left, currency required, remaining per expansion, active goals, and your biggest raw-material needs. Drill into any card for the full breakdown; every total follows the Attunes (character/account) filter.
+- **Raw-materials calculator** with built-in reagent data for all eleven professions: craftable parts are expanded down the whole chain (Casing → Bars → Ore) and your bags, bank and resource bank are subtracted, so you see the true raw materials still missing. A profession-window scanner records any server-custom recipes. Click a material to see which items need it.
+
+*Better recommendations*
+- The **AttuneNext button** can recommend a whole run, not just an item: **Off / Dungeons only / Raids only / Dungeons & raids / Zones / All**. Zone mode ranks open-world zones by expected attunes from quests and world drops. Results name the dungeon, raid or zone and show expected new attunes per clear, with Ignore to step to the next best.
+- **Goal tracker**: track a dungeon set, a single instance, or one specific difficulty, then watch progress bars and estimated clears remaining — in the addon, on the home dashboard, or in a small on-screen window.
+- The **Show filter is now Forge Level**: **Attunable / Titanforged / Warforged / Lightforged**, each showing what's done at that level versus what's left. Quest rewards can't be forged, so they count as complete once attuned.
+- Under character scope, quest lists hide quests your **race or class can never complete** (4,800+ race and 1,000+ class restrictions mapped).
+
+*Getting there*
+- **Right-click any item** for an arrow to its best source: the highest-drop-rate mob (ties go to the closest zone), a rare's spawn points, the quest start, or the nearest vendor — and craft-only items open their profession window.
+- **Quests that start from a dropped item** now have arrows too, pointing at whatever drops the starter (141 previously arrow-less quests), and **356 rare spawns** are mapped with multiple patrol points.
+- **Tooltips** show *"still needed"* with an item's best source anywhere in the game, including an *"needed on the account"* note naming which of your characters can attune it.
+- **Alerts** warn you when an item you need appears in a loot window or group roll, and when gear you're wearing finishes attuning.
+- **Zone awareness**: entering a zone reports how many attunables are left there, and inside a dungeon or raid a resizable HUD lists them with their sources.
+
+*Interface*
+- Rebuilt in a **painted card style** (art by Jeff): a home dashboard with a live *Recommended Next* card, expansion progress and goals; a two-pane Browse with item details and a context recommendation beside the list; painted filter chips, sidebar navigation, clickable breadcrumbs, search with type filters, and Favorites for any screen plus its filters.
+- **One Options screen** behind the gear button, mirrored by the Interface Options panel.
+- **Instant data at login**: the addon saves every item's status on logout and shows real numbers immediately, then refreshes in the background and announces when it's current.
 
 **v2.11.1**
 - **Profession screens now show crafted items only.** Some items sit in the profession data because a quest *requires* the profession (e.g. the Light's Hope Chapel "Polar Tunic/Gloves/Bracers" turn-ins need Leatherworking 300) — those were wrongly listed on the crafting screens with a skill level. They now appear only under Quests, where they're actually obtained.

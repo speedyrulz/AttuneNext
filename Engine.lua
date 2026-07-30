@@ -20,17 +20,25 @@ local eventItemsCache = {} -- [eventName]     -> { itemIds }
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
 local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
 local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
+local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
+
+function Engine.InvalidateRemaining()
+    remainingCache = nil
+end
 
 function Engine.InvalidateStats()
     statsCache = {}
+    remainingCache = nil
 end
 
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
+    if Engine.InvalidateQuestOnly then Engine.InvalidateQuestOnly() end
     zexCache = {}
     limitedItemsSet = nil
     eventItemsCache = {}
+    remainingCache = nil
     Engine.universeCache = nil
     Engine.scanJobs = {}
     Engine.scanning = false
@@ -108,11 +116,17 @@ function Engine.ExportCache()
     }
 end
 
--- Returns true if a valid cache was restored
-function Engine.ImportCache()
+-- Returns true if a valid cache was restored. `provisional` restores the
+-- structure BEFORE the server loot DB is ready (instant UI at login); the
+-- normal validated import at data-ready then confirms or rescans.
+function Engine.ImportCache(provisional)
     local sc = ANx.db and ANx.db.structCache
     if not sc then return false end
-    if not ANx.LootDbLoaded() or sc.version ~= _G.ItemLocIsLoaded() or sc.rev ~= ANx.VERSION then
+    if sc.rev ~= ANx.VERSION then
+        ANx.db.structCache = nil
+        return false
+    end
+    if not provisional and (not ANx.LootDbLoaded() or sc.version ~= _G.ItemLocIsLoaded()) then
         ANx.db.structCache = nil
         return false
     end
@@ -211,6 +225,28 @@ function Engine.Sources(itemId)
         srcCache[itemId] = s
     end
     return s
+end
+
+-- true when EVERY source of the item is a quest reward (can't be forged)
+local questOnlyCache = {}
+function Engine.IsQuestOnly(itemId)
+    local v = questOnlyCache[itemId]
+    if v == nil then
+        local srcs = Engine.Sources(itemId)
+        if #srcs == 0 then
+            v = false
+        else
+            v = true
+            for _, src in ipairs(srcs) do
+                if src.srcType ~= ANx.SRC.QUEST then v = false break end
+            end
+        end
+        questOnlyCache[itemId] = v
+    end
+    return v
+end
+function Engine.InvalidateQuestOnly()
+    questOnlyCache = {}
 end
 
 local function ZoneNameMatch(a, b)
@@ -527,6 +563,240 @@ function Engine.ProfessionEntries(prof, exp)
     -- filter can't tell crafts from quest turn-ins yet
     if dbReady then profCache[key] = c end
     return c
+end
+
+-- ---------------------------------------------------------------------
+-- "What's Left" report (totals-only summary + drill-downs)
+-- ---------------------------------------------------------------------
+-- Is this item still LEFT for the given scope, independent of db.scope?
+-- Applies the user's optional filters (faction, zone-exclusive, bind,
+-- accessories). "Done" is base attunement - the forge target is intentionally
+-- ignored here: this report counts attunes, not forge upgrades.
+function Engine.ScopeLeft(itemId, scope)
+    if not ANx.IsAttunableAtAll(itemId) then return false end
+    if scope == "char" then
+        if not ANx.CanCharAttune(itemId) then return false end
+        if ANx.IsAttuned(itemId) then return false end
+    else
+        if ANx.AccountHasVariant(itemId) then return false end
+    end
+    if not ANx.FactionAllowed(itemId) then return false end
+    if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
+    if not ANx.BindAllowed(itemId) then return false end
+    if not ANx.AccessoryAllowed(itemId) then return false end
+    return true
+end
+
+-- Full remaining report for both scopes in one pass over the universe:
+--   char/acct = { attunes = n, crafted = n, cur = { [currency] = total } }
+--   curNames  = currency names sorted by account need (Gold last)
+--   curItems  = { char = { [currency] = {ids} }, acct = ... } for drill-downs
+--   craftProf = [itemId] = professionName for every craftable
+function Engine.RemainingReport()
+    if remainingCache then return remainingCache end
+    local r = {
+        char = { attunes = 0, crafted = 0, cur = {} },
+        acct = { attunes = 0, crafted = 0, cur = {} },
+        curNames = {},
+        curItems = { char = {}, acct = {} },
+        craftProf = {},
+    }
+    for _, prof in ipairs(ANx.ProfessionOrder or {}) do
+        for exp = 1, 3 do
+            for _, e in ipairs(Engine.ProfessionEntries(prof, exp)) do
+                r.craftProf[e.id] = prof
+            end
+        end
+    end
+    local universe, ready = Engine.Universe()
+    r.ready = ready
+    local seenCur = {}
+    for _, id in ipairs(universe) do
+        local costs
+        for _, scope in ipairs({ "char", "acct" }) do
+            if Engine.ScopeLeft(id, scope) then
+                local t = r[scope]
+                t.attunes = t.attunes + 1
+                if r.craftProf[id] then t.crafted = t.crafted + 1 end
+                if costs == nil then costs = Engine.ItemCurrencies(id) or false end
+                if costs then
+                    local li = r.curItems[scope]
+                    for _, c in ipairs(costs) do
+                        t.cur[c.name] = (t.cur[c.name] or 0) + c.count
+                        if not seenCur[c.name] then
+                            seenCur[c.name] = true
+                            r.curNames[#r.curNames + 1] = c.name
+                        end
+                        li[c.name] = li[c.name] or {}
+                        li[c.name][#li[c.name] + 1] = id
+                    end
+                end
+            end
+        end
+    end
+    table.sort(r.curNames, function(a, b)
+        if (a == "Gold") ~= (b == "Gold") then return b == "Gold" end -- Gold last
+        local na, nb = r.acct.cur[a] or 0, r.acct.cur[b] or 0
+        if na ~= nb then return na > nb end
+        return a < b
+    end)
+    if ready then remainingCache = r end
+    return r
+end
+
+-- Remaining counts by expansion + content type + events, for one scope.
+function Engine.RemainingByCategory(scope)
+    local out = { exps = {}, cats = {}, events = 0 }
+    for exp = 1, 3 do
+        local s = summaryCache[exp]
+        local seenExp = {}
+        if s then
+            for _, cat in ipairs({ "D", "R", "Q", "W", "V", "C" }) do
+                local n = 0
+                for id in pairs(s[cat] or {}) do
+                    if Engine.ScopeLeft(id, scope) then
+                        n = n + 1
+                        seenExp[id] = true
+                    end
+                end
+                out.cats[cat] = (out.cats[cat] or 0) + n
+            end
+        end
+        local e = 0
+        for _ in pairs(seenExp) do e = e + 1 end
+        out.exps[exp] = e
+    end
+    for _, id in ipairs(Engine.AllEventItems()) do
+        if Engine.ScopeLeft(id, scope) then out.events = out.events + 1 end
+    end
+    return out
+end
+
+-- Remaining craftable counts per profession (both scopes).
+function Engine.RemainingCraftByProf()
+    local craftProf = Engine.RemainingReport().craftProf
+    local per = {}
+    for id, p in pairs(craftProf) do
+        local t = per[p]
+        if not t then t = { char = 0, acct = 0 }; per[p] = t end
+        if Engine.ScopeLeft(id, "char") then t.char = t.char + 1 end
+        if Engine.ScopeLeft(id, "acct") then t.acct = t.acct + 1 end
+    end
+    return per
+end
+
+-- Reagent list for a crafted item: a live profession-window scan wins (server
+-- truth, covers Synastria custom recipes), else the built-in 3.3.5 craft data.
+function Engine.ReagentsOf(itemId)
+    local rg = ANx.db and ANx.db.reagents and ANx.db.reagents[itemId]
+    if rg then return rg end
+    return ANx.Reagents and ANx.Reagents[itemId] or nil
+end
+
+-- Items produced per craft (e.g. one smelt yields 2 Bronze Bars). Follows the
+-- same precedence as ReagentsOf: for a scanned recipe the scanned output (or 1)
+-- applies; otherwise the built-in table.
+function Engine.ReagentOutputOf(itemId)
+    if ANx.db and ANx.db.reagents and ANx.db.reagents[itemId] then
+        return (ANx.db.reagentOutput and ANx.db.reagentOutput[itemId]) or 1
+    end
+    return (ANx.ReagentOutput and ANx.ReagentOutput[itemId]) or 1
+end
+
+-- Everything the CURRENT character has of an item: bags + bank + resource bank.
+function Engine.HaveCount(itemId)
+    local n = 0
+    if _G.GetItemCount then
+        local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
+        if ok and type(c) == "number" then n = n + c end
+    end
+    if _G.GetCustomGameData then
+        local ok, c = pcall(_G.GetCustomGameData, 13, itemId) -- Synastria resource bank
+        if ok and type(c) == "number" then n = n + c end
+    end
+    return n
+end
+
+-- Raw materials needed to craft every remaining craftable (optionally one
+-- profession). Demands are expanded down the crafting chain to TRUE raw
+-- materials (Casing -> Bars -> Ore), and what the current character already
+-- has (bags + bank + resource bank) is consumed at every level of the chain.
+-- Each scope column is computed with its own copy of your stock.
+-- Returns: rows { {id=reagentId, char=n, acct=n} } sorted by account total desc,
+--          left { char=n, acct=n } remaining craftables,
+--          unscanned { char=n, acct=n } craftables with no reagent data at all.
+function Engine.RemainingMaterials(prof)
+    local craftProf = Engine.RemainingReport().craftProf
+    local mats, left, unscanned = {}, { char = 0, acct = 0 }, { char = 0, acct = 0 }
+
+    local users = {}   -- [rawMaterialId] = { set of remaining gear itemIds that need it }
+
+    -- expand a demand of `count` x item `id` into raw materials, consuming
+    -- on-hand stock first; `path` guards against recipe cycles (essences).
+    local function expand(out, avail, id, count, path, depth, topId)
+        local have = avail[id]
+        if have == nil then have = Engine.HaveCount(id); avail[id] = have end
+        if have > 0 then
+            local use = (have < count) and have or count
+            avail[id] = have - use
+            count = count - use
+            if count == 0 then return end
+        end
+        local rg = Engine.ReagentsOf(id)
+        if not rg or path[id] or depth >= 8 then
+            out[id] = (out[id] or 0) + count       -- a true raw material
+            local u = users[id]
+            if not u then u = {}; users[id] = u end
+            u[topId] = true
+            return
+        end
+        local crafts = math.ceil(count / Engine.ReagentOutputOf(id))
+        path[id] = true
+        for i = 1, #rg - 1, 2 do
+            expand(out, avail, rg[i], rg[i + 1] * crafts, path, depth + 1, topId)
+        end
+        path[id] = nil
+    end
+
+    for _, scope in ipairs({ "char", "acct" }) do
+        local out, avail = {}, {}
+        for id, p in pairs(craftProf) do
+            if not prof or p == prof then
+                if Engine.ScopeLeft(id, scope) then
+                    left[scope] = left[scope] + 1
+                    local rg = Engine.ReagentsOf(id)
+                    if rg then
+                        for i = 1, #rg - 1, 2 do
+                            expand(out, avail, rg[i], rg[i + 1], {}, 1, id)
+                        end
+                    else
+                        unscanned[scope] = unscanned[scope] + 1
+                    end
+                end
+            end
+        end
+        for rid, n in pairs(out) do
+            if n > 0 then
+                local m = mats[rid]
+                if not m then m = { char = 0, acct = 0 }; mats[rid] = m end
+                m[scope] = n
+            end
+        end
+    end
+
+    local rows = {}
+    for rid, m in pairs(mats) do
+        local ulist = {}
+        for gid in pairs(users[rid] or {}) do ulist[#ulist + 1] = gid end
+        table.sort(ulist)
+        rows[#rows + 1] = { id = rid, char = m.char, acct = m.acct, users = ulist }
+    end
+    table.sort(rows, function(a, b)
+        if a.acct ~= b.acct then return a.acct > b.acct end
+        if a.char ~= b.char then return a.char > b.char end
+        return a.id < b.id
+    end)
+    return rows, left, unscanned
 end
 
 -- ---------------------------------------------------------------------
@@ -1180,4 +1450,171 @@ function Engine.RankInstanceRuns(view)
         return x.count > y.count
     end)
     return runs
+end
+
+-- Ranked list of ZONE runs (quests + world drops in open-world zones),
+-- best first by expected new attunes for a full sweep of the zone.
+local zoneRunSrc
+local function ZoneRunSrc()
+    if not zoneRunSrc then
+        zoneRunSrc = { [ANx.SRC.QUEST] = true }
+        for k in pairs(ANx.WORLD_DROP_SRC or {}) do zoneRunSrc[k] = true end
+    end
+    return zoneRunSrc
+end
+
+function Engine.RankZoneRuns(view)
+    local a = ANx.db and ANx.db.anext or {}
+    local ignoreInst = a.ignoreInst or {}
+    local runs = {}
+    for _, z in ipairs(ANx.Zones or {}) do
+        local key = "z:" .. z.zone
+        if not ignoreInst[key] then
+            local expected, count, items = 0, 0, {}
+            for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
+                if Engine.Eligible(id) and not ANx.CountDone(id) then
+                    local chance = Engine.BestSource(id, z.name, ZoneRunSrc())
+                    if chance and chance > 0 then
+                        count = count + 1
+                        items[#items + 1] = id
+                        expected = expected + math.min(chance, 100) / 100
+                    end
+                end
+            end
+            if count > 0 then
+                runs[#runs + 1] = { zone = z, expected = expected, count = count,
+                    instKey = key, items = items }
+            end
+        end
+    end
+    table.sort(runs, function(x, y)
+        if x.expected ~= y.expected then return x.expected > y.expected end
+        return x.count > y.count
+    end)
+    return runs
+end
+
+-- Unified run ranking for the AttuneNext button, honoring the run mode:
+-- "D"/"R"/"DR" = instances of those kinds, "Z" = zones, "all" = everything.
+function Engine.RankRuns(view, mode)
+    mode = mode or "DR"
+    local runs = {}
+    if mode ~= "Z" then
+        local only = (mode == "D" and "D") or (mode == "R" and "R") or nil
+        for _, r in ipairs(Engine.RankInstanceRuns(view)) do
+            if not only or r.kind == only then runs[#runs + 1] = r end
+        end
+    end
+    if mode == "Z" or mode == "all" then
+        for _, r in ipairs(Engine.RankZoneRuns(view)) do runs[#runs + 1] = r end
+    end
+    table.sort(runs, function(x, y)
+        if x.expected ~= y.expected then return x.expected > y.expected end
+        return x.count > y.count
+    end)
+    return runs
+end
+
+-- ---------------------------------------------------------------------
+-- Goal tracker
+-- ---------------------------------------------------------------------
+function Engine.InstanceByMap(map)
+    for _, inst in ipairs(ANx.Instances or {}) do
+        if inst.map == map then return inst end
+    end
+end
+
+function Engine.GoalName(goal)
+    if goal.kind == "inst" then
+        local n = goal.name or ("Instance " .. tostring(goal.map))
+        if goal.diffText then n = n .. "  (" .. goal.diffText .. ")" end
+        return n
+    end
+    return (ANx.EXP_SHORT[goal.exp] or "?") .. " "
+        .. (goal.content == "D" and "Dungeons" or "Raids")
+end
+
+function Engine.GoalKey(goal)
+    if goal.kind == "inst" then
+        return "i" .. tostring(goal.map) .. ":" .. tostring(goal.diff or "*")
+    end
+    return "c" .. tostring(goal.exp) .. tostring(goal.content)
+end
+
+-- does this difficulty entry belong to the goal? A difficulty-specific goal
+-- pins its own difficulty (and ignores the global Difficulty/Size filter);
+-- whole-instance goals follow the filter like everything else.
+local function GoalDiffMatch(diff, label)
+    if diff then return label == diff end
+    return ANx.DifficultyMatches(label)
+end
+
+-- Estimated clears to finish one instance, using the same expected-attunes-
+-- per-clear math as the AttuneNext recommender. Also counts left items with
+-- no drop rate (vendor/quest/craft-sourced things inside the instance set).
+local function InstanceClears(inst, diff)
+    local leftDrop, expected, noDrop = 0, 0, 0
+    local seen = {}
+    for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
+        if GoalDiffMatch(diff, d.label) then
+            for _, id in ipairs(d.items) do
+                if not seen[id] and Engine.Eligible(id) and not ANx.CountDone(id) then
+                    seen[id] = true
+                    local chance = Engine.BestSource(id, inst.name, ANx.INSTANCE_DROP_SRC) or 0
+                    if chance > 0 then
+                        leftDrop = leftDrop + 1
+                        expected = expected + chance / 100
+                    else
+                        noDrop = noDrop + 1
+                    end
+                end
+            end
+        end
+    end
+    if leftDrop == 0 or expected <= 0 then return 0, noDrop end
+    return math.ceil(leftDrop / expected), noDrop
+end
+
+-- Full status for one goal: { name, total, done, left, pct, clears, noDrop,
+-- items (inst goals: the deduped item list for click-through) }
+function Engine.GoalStatus(goal)
+    local st = { name = Engine.GoalName(goal), total = 0, done = 0,
+                 clears = 0, noDrop = 0 }
+    local seen = {}
+    local function addItem(id)
+        if not seen[id] and Engine.Eligible(id) then
+            seen[id] = true
+            st.total = st.total + 1
+            if ANx.CountDone(id) then st.done = st.done + 1 end
+            return true
+        end
+    end
+    if goal.kind == "inst" then
+        local inst = Engine.InstanceByMap(goal.map)
+        if inst then
+            st.items = {}
+            for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
+                if GoalDiffMatch(goal.diff, d.label) then
+                    for _, id in ipairs(d.items) do
+                        if addItem(id) then st.items[#st.items + 1] = id end
+                    end
+                end
+            end
+            st.clears, st.noDrop = InstanceClears(inst, goal.diff)
+        end
+    else
+        for _, inst in ipairs(Engine.InstancesFor(goal.exp, goal.content) or {}) do
+            for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
+                if ANx.DifficultyMatches(d.label) then
+                    for _, id in ipairs(d.items) do addItem(id) end
+                end
+            end
+            local clears, noDrop = InstanceClears(inst)
+            st.clears = st.clears + clears
+            st.noDrop = st.noDrop + noDrop
+        end
+    end
+    st.left = st.total - st.done
+    st.pct = (st.total > 0) and (st.done / st.total) or 0
+    return st
 end

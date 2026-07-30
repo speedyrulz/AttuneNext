@@ -222,6 +222,97 @@ local function ArrowToPoint(zoneId, x, y, label, subject)
     return false
 end
 
+-- Public: arrow to the middle of a named zone (drop sources tell us the
+-- zone, not the mob's patrol path). Returns true on arrow.
+function ANx.SetZoneCenterWaypoint(zoneName, label)
+    if not zoneName or zoneName == "" then return false end
+    local c, z = FindCZByZoneName(zoneName)
+    if not c then return false end
+    local via = SendWaypoint(c, z, 50, 50, label or zoneName)
+    if via then
+        ANx.Print("|cff00ff00Waypoint set|r via " .. via .. ": "
+            .. (label or "") .. " - " .. zoneName)
+        return true
+    end
+    ANx.Print("|cffff8040No arrow addon found|r (install Carbonite or TomTom).")
+    return false
+end
+
+-- Public: right-click router - arrow to an item's best source.
+--  drops first (highest chance, ties -> closest), then quest start, then the
+--  closest vendor; craft-only items open their profession's window instead.
+function ANx.ArrowToItem(itemId)
+    local Engine = ANx.Engine
+    local srcs = (Engine and Engine.Sources and Engine.Sources(itemId))
+        or (ANx.GetSources and ANx.GetSources(itemId)) or {}
+    local name = (ANx.GetItemDisplay and ANx.GetItemDisplay(itemId)) or ("Item " .. itemId)
+    if #srcs == 0 then
+        ANx.Print("No source data for " .. name .. ".")
+        return false
+    end
+    local S = ANx.SRC
+    -- 1) drop sources
+    local drops = {}
+    for _, sc in ipairs(srcs) do
+        if sc.srcType ~= S.QUEST and sc.srcType ~= S.VENDOR
+            and sc.srcType ~= S.CRAFT_TRAINER and sc.srcType ~= S.CRAFT_RECIPE then
+            drops[#drops + 1] = sc
+        end
+    end
+    if #drops > 0 then
+        table.sort(drops, function(x, y)
+            if (x.chance or 0) ~= (y.chance or 0) then return (x.chance or 0) > (y.chance or 0) end
+            return ANx.DistanceRank({ zoneName = x.zoneName })
+                 < ANx.DistanceRank({ zoneName = y.zoneName })
+        end)
+        local d = drops[1]
+        if ANx.HasRareLoc and ANx.HasRareLoc(d.objId) then
+            return ANx.SetRareWaypoint(d.objId, d.objName)
+        end
+        if ANx.SetZoneCenterWaypoint(d.zoneName, name .. " - " .. (d.objName or "?")) then
+            return true
+        end
+        ANx.Print(string.format("%s drops from |cffffff00%s|r in |cffffff00%s|r %s(no overworld route).",
+            name, d.objName or "?", d.zoneName or "?",
+            string.format("|cff00ff88%.1f%%|r ", d.chance or 0)))
+        return false
+    end
+    -- 2) quest start
+    for _, sc in ipairs(srcs) do
+        if sc.srcType == S.QUEST and sc.objId then
+            return ANx.SetQuestWaypoint(sc.objId, sc.objName)
+        end
+    end
+    -- 3) closest vendor
+    local vends = {}
+    for _, sc in ipairs(srcs) do
+        if sc.srcType == S.VENDOR then vends[#vends + 1] = sc end
+    end
+    if #vends > 0 then
+        table.sort(vends, function(x, y)
+            return ANx.DistanceRank({ zoneName = x.zoneName })
+                 < ANx.DistanceRank({ zoneName = y.zoneName })
+        end)
+        return ANx.SetVendorWaypoint(vends[1].objId, vends[1].objName)
+    end
+    -- 4) craft-only: open the profession window
+    local prof = ANx.ProfessionOfItem and ANx.ProfessionOfItem(itemId)
+    if prof then
+        if _G.CastSpellByName then
+            local ok = pcall(_G.CastSpellByName, prof)
+            if ok then
+                ANx.Print(name .. " is crafted by |cffffff00" .. prof .. "|r - opening its window.")
+                return true
+            end
+        end
+        ANx.Print(name .. " is crafted by |cffffff00" .. prof
+            .. "|r (this character may not know it).")
+        return false
+    end
+    ANx.Print("No routable source for " .. name .. ".")
+    return false
+end
+
 -- Sets the arrow to the giver of a specific quest id. Returns true on arrow.
 local function ArrowToGiver(qid, label)
     local e = ANx.QuestGivers and ANx.QuestGivers[qid]
@@ -246,6 +337,35 @@ end
 
 function ANx.HasVendorLoc(npcId)
     return npcId ~= nil and ANx.VendorLocs ~= nil and ANx.VendorLocs[npcId] ~= nil
+end
+
+-- ---------------------------------------------------------------------
+-- Rare-spawn arrows: rares patrol several camps, so repeated clicks cycle
+-- through the known spawn points.
+-- ---------------------------------------------------------------------
+local rareCycle = {}   -- [npcId] = index of the spawn point shown last
+
+function ANx.HasRareLoc(npcId)
+    return npcId ~= nil and ANx.RareLocs ~= nil and ANx.RareLocs[npcId] ~= nil
+end
+
+function ANx.SetRareWaypoint(npcId, rareName)
+    rareName = rareName or "Rare spawn"
+    local pts = npcId and ANx.RareLocs and ANx.RareLocs[npcId]
+    if not pts or #pts < 3 then
+        ANx.Print("No spawn location known for \"" .. rareName .. "\".")
+        return false
+    end
+    local n = math.floor(#pts / 3)
+    local idx = ((rareCycle[npcId] or 0) % n) + 1
+    rareCycle[npcId] = idx
+    local base = (idx - 1) * 3
+    local label = rareName .. (n > 1 and string.format(" (spawn %d of %d)", idx, n) or "")
+    if n > 1 then
+        ANx.Print("|cffff8000Rare spawn point " .. idx .. " of " .. n
+            .. "|r - click again for the next one.")
+    end
+    return ArrowToPoint(pts[base + 1], pts[base + 2] / 10, pts[base + 3] / 10, label, label)
 end
 
 -- ---------------------------------------------------------------------

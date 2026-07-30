@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "2.11.1"
+ANx.VERSION = "3.0.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -104,7 +104,7 @@ local defaults = {
     faction = "both",     -- "both", "A" (Alliance), or "H" (Horde)
     raresOnly = false,    -- World Drops: only items that drop from rare spawns
     zoneExclusive = false,-- global: only count/show items found in a single zone
-    forge = 0,            -- forge target (0..4): "Left" = items at this tier or below
+    forge = 1,            -- Forge Level (1 Attunable, 2 TF, 3 WF, 4 LF)
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
@@ -115,11 +115,25 @@ local defaults = {
         context = false,  --   pick only from the screen you're on
         focus = false,    --   focus the zone/instance/craft/currency with the most left
         dropRate = false, --   factor in drop rates (excludes vendor/quest/crafted items)
-        instance = false, --   recommend a whole dungeon/raid run (not one item)
+        instance = "off", --  recommend a whole run: off/D/R/DR/Z/all (old true = "DR")
         ignore = {},      --   [itemId] = true : items to skip
         ignoreInst = {},  --   [instKey] = true : instance runs to skip
     },
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
+    reagents = {},        -- [craftedItemId] = { reagentId1, count1, ... } from profession-window scans (account-wide)
+    reagentProfs = {},    -- [professionName] = true once its window has been scanned
+    reagentOutput = {},   -- [craftedItemId] = items produced per craft (scanned; only >1)
+    tooltip = true,       -- add attunement info to item tooltips
+    alerts = true,        -- loot/roll alerts + "swap it out" when an equipped item attunes
+    zonewatch = true,     -- zone-entry chat note ("N attunables left in ...")
+    zoneHud = true,       -- the draggable in-instance HUD window
+    goalHud = true,       -- the on-screen goal progress window (shows while goals exist)
+    goals = {},           -- tracked goals: {kind="content",exp=,content=} or {kind="inst",map=,name=}
+    altCan = {},          -- [charName] = { class=, className=, level=, items={ids} } login snapshots
+    searchType = "items", -- search mode: items/vendors/dungeons/raids/profs/quests
+    favorites = {},       -- saved screens+filters: { label=, desc=, filters=, key= }
+    searchFilters = true, -- searches respect the active filters (toggle next to Find)
+    statusCache = nil,    -- per-item status snapshot served before server data arrives
 }
 
 local function ApplyDefaults(db, def)
@@ -172,6 +186,19 @@ end
 function ANx.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99AttuneNext|r: " .. tostring(msg))
 end
+
+-- on-screen toast (center text) + chat line
+function ANx.Toast(msg)
+    ANx.Print(msg)
+    if _G.UIErrorsFrame and _G.UIErrorsFrame.AddMessage then
+        local plain = tostring(msg):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+        _G.UIErrorsFrame:AddMessage(plain, 0.2, 1.0, 0.6, 1.0)
+    end
+end
+
+-- true once the Synastria server data (attunes + loot DB) is available this
+-- session; before that, item status is served from the saved statusCache
+ANx.dataReady = false
 
 function ANx.FormatChance(chance)
     if not chance then return "?" end
@@ -244,25 +271,82 @@ function ANx.LootDbLoaded()
     return type(_G.ItemLocIsLoaded) == "function" and _G.ItemLocIsLoaded() ~= nil
 end
 
+-- ---------------------------------------------------------------------
+-- Status cache: a per-item snapshot saved at logout (and after each data
+-- refresh) so the UI shows real numbers IMMEDIATELY at login, before the
+-- server has pushed this session's data. Once live data arrives every
+-- accessor switches back to the real APIs.
+-- ---------------------------------------------------------------------
+local scSets   -- runtime membership sets built lazily from the saved arrays
+
+function ANx.InvalidateStatusCacheSets()
+    scSets = nil
+end
+
+local function SC()
+    local sc = ANx.db and ANx.db.statusCache
+    if not sc then return nil end
+    local me = (_G.UnitName and _G.UnitName("player")) or "?"
+    if sc.char ~= me then return nil end   -- another character's snapshot
+    if not scSets then
+        scSets = { can = {}, acct = {}, tags = {} }
+        for _, id in ipairs(sc.can or {}) do scSets.can[id] = true end
+        for _, id in ipairs(sc.acct or {}) do scSets.acct[id] = true end
+        for _, id in ipairs(sc.tags or {}) do scSets.tags[id] = true end
+    end
+    return sc, scSets
+end
+
+-- Save the snapshot (call when data is live: logout + after refresh)
+function ANx.ExportStatusCache()
+    if not (ANx.db and ANx.Engine and ANx.dataReady) then return end
+    local universe, ready = ANx.Engine.Universe()
+    if not ready or #universe == 0 then return end
+    local sc = { char = (_G.UnitName and _G.UnitName("player")) or "?",
+                 prog = {}, can = {}, acct = {}, tags = {}, forge = {} }
+    for _, id in ipairs(universe) do
+        if ANx.IsAttunableAtAll(id) then sc.tags[#sc.tags + 1] = id end
+        if ANx.CanCharAttune(id) then sc.can[#sc.can + 1] = id end
+        if ANx.AccountHasVariant(id) then sc.acct[#sc.acct + 1] = id end
+        local p = ANx.Progress(id)
+        if p > 0 then sc.prog[id] = p end
+        local f = (_G.GetItemAttuneForge and _G.GetItemAttuneForge(id)) or 0
+        if f >= 1 then sc.forge[id] = f end
+    end
+    ANx.db.statusCache = sc
+    scSets = nil
+end
+
 -- Can the CURRENT CHARACTER attune this item (class/armor/level checks)?
 function ANx.CanCharAttune(itemId)
+    if not ANx.dataReady then
+        local _, sets = SC()
+        if sets then return sets.can[itemId] == true end
+    end
     local v = _G.CanAttuneItemHelper and _G.CanAttuneItemHelper(itemId)
     return (v or 0) > 0
 end
 
 -- Has the CURRENT CHARACTER fully attuned the base item?
 function ANx.IsAttuned(itemId)
-    local p = _G.GetItemAttuneProgress and _G.GetItemAttuneProgress(itemId)
-    return (p or 0) >= 100
+    return ANx.Progress(itemId) >= 100
 end
 
 -- Attune progress 0..100
 function ANx.Progress(itemId)
+    if not ANx.dataReady then
+        local sc = SC()
+        if sc then return (sc.prog and sc.prog[itemId]) or 0 end
+    end
     return (_G.GetItemAttuneProgress and _G.GetItemAttuneProgress(itemId)) or 0
 end
 
 -- Account attuned some variant (affix/forge) of the item
 function ANx.AccountHasVariant(itemId)
+    if not ANx.dataReady then
+        local _, sets = SC()
+        if sets then return sets.acct[itemId] == true end
+    end
     if _G.HasAttunedAnyVariantOfItem then
         return _G.HasAttunedAnyVariantOfItem(itemId) and true or false
     end
@@ -296,18 +380,64 @@ function ANx.CountAttuned(itemId)
     return ANx.IsAttuned(itemId)
 end
 
--- Forge tiers: 0 Unattuned, 1 Attuned (base), 2 Titanforged, 3 Warforged, 4 Lightforged
+-- Item tiers stay 0..4 (0 unattuned, 1 attuned, 2 TF, 3 WF, 4 LF).
+-- The FILTER is a Forge Level - the state you're working toward:
+--   1 Attunable   : done once attuned            (left = unattuned)
+--   2 Titanforged : done once TF or better       (left = tiers 0-1)
+--   3 Warforged   : done once WF or better       (left = tiers 0-2)
+--   4 Lightforged : done once LF                 (left = tiers 0-3)
 ANx.FORGE_TIERS  = { "unattuned", "attuned", "tf", "wf", "lf" }
 ANx.FORGE_LABELS = {
-    [0] = "Unattuned", [1] = "Attuned", [2] = "Titanforged",
+    [1] = "Attunable", [2] = "Titanforged",
     [3] = "Warforged", [4] = "Lightforged",
 }
 ANx.FORGE_SHORT  = { [1] = "Attuned", [2] = "TF", [3] = "WF", [4] = "LF" }
 
+-- Whole-run recommendation mode (the "Recommend a whole dungeon/raid/zone"
+-- option). Old saved booleans map onto the new modes transparently.
+ANx.RUN_MODES = { "off", "D", "R", "DR", "Z", "all" }
+ANx.RUN_MODE_LABELS = {
+    off = "Off", D = "Dungeons only", R = "Raids only",
+    DR = "Dungeons & raids", Z = "Zones", all = "All",
+}
+-- Which profession crafts this item (reverse lookup, built lazily)
+local profOfItem
+function ANx.ProfessionOfItem(itemId)
+    if not profOfItem then
+        profOfItem = {}
+        for prof, list in pairs(ANx.ProfessionItems or {}) do
+            for _, e in ipairs(list) do
+                if type(e) == "table" and e[1] then profOfItem[e[1]] = prof end
+            end
+        end
+    end
+    return profOfItem[itemId]
+end
+function ANx.InvalidateProfOfItem() profOfItem = nil end
+
+function ANx.RunMode()
+    local m = ANx.db and ANx.db.anext and ANx.db.anext.instance
+    if m == true then return "DR" end
+    if not m or m == false or m == "off" then return "off" end
+    if ANx.RUN_MODE_LABELS[m] then return m end
+    return "off"
+end
+
+function ANx.ForgeLevel()
+    local l = (ANx.db and ANx.db.forge) or 1
+    if l < 1 then l = 1 elseif l > 4 then l = 4 end
+    return l
+end
+
 -- Current attunement/forge tier of an item (0..4), scope-aware.
 -- forge level from GetItemAttuneForge is account-wide (1=TF, 2=WF, 3=LF).
 function ANx.CurrentTier(itemId)
-    local forge = (_G.GetItemAttuneForge and _G.GetItemAttuneForge(itemId)) or 0
+    local forge
+    if not ANx.dataReady then
+        local sc = SC()
+        if sc then forge = (sc.forge and sc.forge[itemId]) or 0 end
+    end
+    forge = forge or (_G.GetItemAttuneForge and _G.GetItemAttuneForge(itemId)) or 0
     if forge and forge >= 1 then
         if forge >= 3 then return 4 end
         if forge == 2 then return 3 end
@@ -317,22 +447,27 @@ function ANx.CurrentTier(itemId)
     return 0
 end
 
--- The forge filter is a TARGET tier. An item is still "left" (needs work) if
--- its current tier is at or below the target; it's "done" once it's past it.
---   target Unattuned(0): left = unattuned only          (default; = "what's left")
---   target Warforged(3): left = everything not Lightforged
---   target Lightforged(4): left = everything
+-- Per-item forge target: quest rewards can never be forged, so their target
+-- is always plain attunement no matter the Forge Level.
+function ANx.ItemForgeTarget(itemId)
+    local l = ANx.ForgeLevel()
+    if l > 1 and ANx.Engine and ANx.Engine.IsQuestOnly and ANx.Engine.IsQuestOnly(itemId) then
+        return 1
+    end
+    return l
+end
+
 function ANx.ForgeAllowed(itemId)   -- visible in item lists (= still "left")
-    return ANx.CurrentTier(itemId) <= (ANx.db and ANx.db.forge or 0)
+    return ANx.CurrentTier(itemId) < ANx.ItemForgeTarget(itemId)
 end
 
-function ANx.CountDone(itemId)      -- counts toward "attuned"/done in the stats
-    return ANx.CurrentTier(itemId) > (ANx.db and ANx.db.forge or 0)
+function ANx.CountDone(itemId)      -- counts toward "done" in the stats
+    return ANx.CurrentTier(itemId) >= ANx.ItemForgeTarget(itemId)
 end
 
--- Legacy "show attuned items" flag now derives from the forge threshold.
+-- Completed nodes stay listed while you're chasing forge upgrades.
 function ANx.ShowAttunedItems()
-    return (ANx.db and ANx.db.forge or 0) >= 1
+    return ANx.ForgeLevel() >= 2
 end
 
 -- ---------------------------------------------------------------------
@@ -510,7 +645,79 @@ function ANx.NodeFactionAllowed(kind, id)
     return nf == fac
 end
 
+-- ---------------------------------------------------------------------
+-- Quest race/class requirements (standard DBC bitmasks from Data_QuestReq)
+-- ---------------------------------------------------------------------
+local RACE_MASK = {  -- UnitRace("player") file names
+    Human = 1, Orc = 2, Dwarf = 4, NightElf = 8, Scourge = 16, Tauren = 32,
+    Gnome = 64, Troll = 128, Goblin = 256, BloodElf = 512, Draenei = 1024,
+}
+local CLASS_MASK = { -- UnitClass("player") file names
+    WARRIOR = 1, PALADIN = 2, HUNTER = 4, ROGUE = 8, PRIEST = 16,
+    DEATHKNIGHT = 32, SHAMAN = 64, MAGE = 128, WARLOCK = 256, DRUID = 1024,
+}
+local playerRaceMask, playerClassMask
+
+function ANx.InvalidatePlayerIdentity()
+    playerRaceMask, playerClassMask = nil, nil
+end
+
+function ANx.PlayerRaceMask()
+    if not playerRaceMask then
+        local file
+        if _G.UnitRace then          -- plain call: `and` would truncate returns
+            local _, f = _G.UnitRace("player")
+            file = f
+        end
+        playerRaceMask = (file and RACE_MASK[file]) or 0
+    end
+    return playerRaceMask
+end
+
+function ANx.PlayerClassMask()
+    if not playerClassMask then
+        local file
+        if _G.UnitClass then
+            local _, f = _G.UnitClass("player")
+            file = f
+        end
+        playerClassMask = (file and CLASS_MASK[file]) or 0
+    end
+    return playerClassMask
+end
+
+-- Can the CURRENT CHARACTER (race + class) ever complete this quest?
+-- Unknown quests / missing data count as doable.
+function ANx.CharCanDoQuest(questId)
+    if not questId then return true end
+    local r = ANx.QuestRaces and ANx.QuestRaces[questId]
+    if r then
+        local pm = ANx.PlayerRaceMask()
+        if pm ~= 0 and bit.band(r, pm) == 0 then return false end
+    end
+    local c = ANx.QuestClasses and ANx.QuestClasses[questId]
+    if c then
+        local pm = ANx.PlayerClassMask()
+        if pm ~= 0 and bit.band(c, pm) == 0 then return false end
+    end
+    return true
+end
+
+-- Full quest-node gate: faction filter always applies; under Character scope
+-- quests this character's race/class can never complete are hidden too.
+function ANx.QuestNodeAllowed(questId)
+    if not ANx.NodeFactionAllowed("quest", questId) then return false end
+    if ANx.db and ANx.db.scope == "char" and not ANx.CharCanDoQuest(questId) then
+        return false
+    end
+    return true
+end
+
 function ANx.IsAttunableAtAll(itemId)
+    if not ANx.dataReady then
+        local _, sets = SC()
+        if sets then return sets.tags[itemId] == true end
+    end
     if _G.GetItemTagsCustom then
         local t = _G.GetItemTagsCustom(itemId)
         if t then return bit.band(t, 64) ~= 0 end
@@ -638,6 +845,14 @@ local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("MERCHANT_SHOW")
+eventFrame:RegisterEvent("TRADE_SKILL_SHOW")
+eventFrame:RegisterEvent("TRADE_SKILL_UPDATE")
+eventFrame:RegisterEvent("BAG_UPDATE")
+eventFrame:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
+eventFrame:RegisterEvent("LOOT_OPENED")
+eventFrame:RegisterEvent("START_LOOT_ROLL")
+eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
 eventFrame:RegisterEvent("PLAYER_MONEY")
 eventFrame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
@@ -654,17 +869,42 @@ local function TryInit()
     end
 end
 
+-- Toast once per session, after the post-login background refresh completes
+local refreshToasted = false
+local function WatchRefreshDone()
+    if refreshToasted then return end
+    if ANx.Engine and not ANx.Engine.scanning and #(ANx.Engine.scanJobs or {}) == 0 then
+        refreshToasted = true
+        if ANx.Engine.InvalidateStats then ANx.Engine.InvalidateStats() end
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+        pcall(ANx.ExportStatusCache)     -- keep next login's snapshot fresh
+        ANx.Toast("AttuneNext data has been refreshed.")
+        return
+    end
+    ANx.After(1, WatchRefreshDone)
+end
+
 -- Global function invoked by the Synastria client when server data is fully loaded
 function AttuneNext_OnDataReady()
     TryInit()
+    ANx.dataReady = true
+    ANx.InvalidateStatusCacheSets()
+    refreshToasted = false   -- each data arrival announces one refresh
     if ANx.Engine then
         ANx.Engine.InvalidateAll()
         -- restore last session's structural scan (loot DB version must match)
         if ANx.Engine.ImportCache() then
             ANx.DebugMsg("structural cache restored from previous session")
         end
+        -- refresh in the background; toast when everything is live
+        for exp = 1, 3 do ANx.Engine.GetSummary(exp) end
+        ANx.After(2, WatchRefreshDone)
     end
     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    -- alt awareness: snapshot what this character can attune (background)
+    if ANx.SnapshotAltCan then ANx.After(8, ANx.SnapshotAltCan) end
+    -- on-screen goal window
+    if ANx.GoalHudUpdate then ANx.After(6, ANx.GoalHudUpdate) end
 end
 
 eventFrame:SetScript("OnEvent", function(self, event, arg1)
@@ -674,12 +914,22 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         ANx.db = _G.AttuneNextDB
         if ANx.InitSettings then ANx.InitSettings() end
 
+        -- instant data at login: restore last session's structure right away
+        -- (validated again once the server data arrives) - item status comes
+        -- from the statusCache until then
+        if ANx.Engine and ANx.Engine.ImportCache and ANx.Engine.ImportCache(true) then
+            ANx.DebugMsg("provisional structure restored (pre-login data)")
+        end
+
         -- Chain into the Synastria custom-data event to catch attunement changes
         local prevHandler = _G.OnCustomGameData
         _G.OnCustomGameData = function(typeId, id, prev, cur)
             if prevHandler then prevHandler(typeId, id, prev, cur) end
             if typeId == 11 then -- ATTUNE_HAS
                 ANx.MarkAttuneDirty()
+                if ANx.OnAttuneCompleted then ANx.OnAttuneCompleted(id) end
+                if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(false) end
+                if ANx.GoalHudUpdate then ANx.GoalHudUpdate() end
             end
         end
     elseif event == "PLAYER_LOGIN" then
@@ -700,8 +950,20 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         end
     elseif event == "MERCHANT_SHOW" then
         if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant) end
+    elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
+        if ANx.QueueTradeSkillScan then ANx.QueueTradeSkillScan() end
+    elseif event == "BAG_UPDATE" or event == "PLAYERBANKSLOTS_CHANGED" then
+        -- the What's Left materials screen nets out your stock; keep it fresh
+        if ANx.UI and ANx.UI.RefreshMats then ANx.UI.RefreshMats() end
+    elseif event == "LOOT_OPENED" then
+        if ANx.CheckLootWindow then ANx.CheckLootWindow() end
+    elseif event == "START_LOOT_ROLL" then
+        if ANx.CheckLootRoll then ANx.CheckLootRoll(arg1) end
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
     elseif event == "PLAYER_LOGOUT" then
         if ANx.Engine then pcall(ANx.Engine.ExportCache) end
+        pcall(ANx.ExportStatusCache)
     elseif event == "PLAYER_MONEY" or event == "CURRENCY_DISPLAY_UPDATE" then
         ANx.InvalidatePlayerCurrency()
         if ANx.db and ANx.db.affordableOnly then
@@ -759,12 +1021,88 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UI then ANx.UI.Show(true) end
     elseif msg == "settings" or msg == "config" or msg == "options" then
         if ANx.OpenSettings then ANx.OpenSettings() end
+    elseif msg == "frames" then
+        -- geometry dump for UI debugging: where each header piece REALLY is
+        local function N(v) return v and math.floor(v + 0.5) or "?" end
+        local function R(region)
+            if not region then return "nil" end
+            local gl = region.GetLeft and region:GetLeft()
+            local gt = region.GetTop and region:GetTop()
+            local gr = region.GetRight and region:GetRight()
+            local gb = region.GetBottom and region:GetBottom()
+            local w = region.GetWidth and region:GetWidth()
+            local h = region.GetHeight and region:GetHeight()
+            local shown = ""
+            if region.IsShown then shown = region:IsShown() and " shown" or " HIDDEN" end
+            return string.format("L=%s T=%s R=%s B=%s W=%s H=%s%s",
+                N(gl), N(gt), N(gr), N(gb), N(w), N(h), shown)
+        end
+        for _, n in ipairs({ "AttuneNextFrame", "AttuneNextForgeBtn",
+            "AttuneNextFindBtn", "AttuneNextGoBtn", "AttuneNextNavhome",
+            "AttuneNextRescanBtn" }) do
+            local b = _G[n]
+            if b then
+                ANx.Print(n .. ": " .. R(b))
+                if b.anxPlate then ANx.Print("   plate: " .. R(b.anxPlate)) end
+                if b.anxHover then ANx.Print("   hover: " .. R(b.anxHover)) end
+                if b.anxChipIcon then ANx.Print("   icon:  " .. R(b.anxChipIcon)) end
+                if b.anxIcon then ANx.Print("   icon:  " .. R(b.anxIcon)) end
+                if b.anxLabel then ANx.Print("   label: " .. R(b.anxLabel)) end
+                if b.anxLogo then ANx.Print("   logo:  " .. R(b.anxLogo)) end
+                if b.anxActive then ANx.Print("   navchip: " .. R(b.anxActive)) end
+                local fs = b.GetFontString and b:GetFontString()
+                if fs then ANx.Print("   enginetext: " .. R(fs)) end
+                if b.GetNormalTexture then
+                    local nt = b:GetNormalTexture()
+                    if nt then ANx.Print("   normaltex: " .. R(nt)) end
+                end
+            end
+        end
+        local F = _G.AttuneNextFrame
+        if F and F.searchBg then ANx.Print("searchBg: " .. R(F.searchBg)) end
+        if F and F.logoTex then ANx.Print("logo: " .. R(F.logoTex)) end
+        -- every region living inside the forge chip, mine or not
+        local fb = _G.AttuneNextForgeBtn
+        if fb and fb.GetRegions then
+            local regs = { fb:GetRegions() }
+            ANx.Print("ForgeBtn regions: " .. #regs)
+            for i = 1, #regs do
+                local r = regs[i]
+                local kind = (r.GetObjectType and r:GetObjectType()) or "?"
+                local tex = (r.GetTexture and r:GetTexture()) or (r.GetText and r:GetText()) or ""
+                ANx.Print(string.format("  [%d]%s%s %s tex=%s", i, kind,
+                    r.anxMine and " (mine)" or " (FOREIGN)", R(r), tostring(tex)))
+            end
+        end
+        if fb and fb.GetChildren then
+            local kids = { fb:GetChildren() }
+            ANx.Print("ForgeBtn child frames: " .. #kids)
+            for i = 1, #kids do
+                local k = kids[i]
+                local nm = (k.GetName and k:GetName()) or "?"
+                local kind = (k.GetObjectType and k:GetObjectType()) or "?"
+                ANx.Print(string.format("  [%d]%s '%s' %s", i, kind, tostring(nm), R(k)))
+                if k.GetRegions then
+                    local kr = { k:GetRegions() }
+                    for j = 1, #kr do
+                        local r = kr[j]
+                        local tex = (r.GetTexture and r:GetTexture()) or ""
+                        ANx.Print(string.format("     .%d %s %s tex=%s",
+                            j, (r.GetObjectType and r:GetObjectType()) or "?", R(r), tostring(tex)))
+                    end
+                end
+            end
+        end
+    elseif msg == "hud" then
+        ANx.db.zoneHud = not ANx.db.zoneHud
+        ANx.Print("instance HUD " .. (ANx.db.zoneHud and "on" or "off"))
+        if ANx.ZoneWatchNow then ANx.ZoneWatchNow(false) end
     elseif msg == "minimap" then
         ANx.db.minimapShow = not ANx.db.minimapShow
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an settings, /an minimap, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an settings, /an minimap, /an hud, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end
