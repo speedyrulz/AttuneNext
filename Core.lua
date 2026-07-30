@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.0.1"
+ANx.VERSION = "3.1.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -105,7 +105,8 @@ local defaults = {
     raresOnly = false,    -- World Drops: only items that drop from rare spawns
     zoneExclusive = false,-- global: only count/show items found in a single zone
     forge = 1,            -- Forge Level (1 Attunable, 2 TF, 3 WF, 4 LF)
-    classicSkin = false,  -- true = plain "classic" look (no painted art pack)
+    classicSkin = false,  -- true = "unskinned" look (no painted art pack)
+    browseWinPos = nil,   -- saved position of the simple browse window
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
@@ -1029,8 +1030,10 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UI then ANx.UI.Show(true) end
     elseif msg == "settings" or msg == "config" or msg == "options" then
         if ANx.OpenSettings then ANx.OpenSettings() end
-    elseif msg == "classic" or msg == "skin" then
-        if ANx.UI and ANx.UI.ToggleClassicSkin then ANx.UI.ToggleClassicSkin() end
+    elseif msg == "unskinned" or msg == "classic" or msg == "skin" then
+        if ANx.UI and ANx.UI.ToggleUnskinned then ANx.UI.ToggleUnskinned() end
+    elseif msg == "browse" then
+        if ANx.WinBrowse then ANx.WinBrowse.Toggle() end
     elseif msg == "frames" then
         -- geometry dump for UI debugging: where each header piece REALLY is
         local function N(v) return v and math.floor(v + 0.5) or "?" end
@@ -1112,7 +1115,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an settings, /an minimap, /an hud, /an classic, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

@@ -202,8 +202,12 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 - **One Options screen** behind the gear button, mirrored by the Interface Options panel.
 - **Instant data at login**: the addon saves every item's status on logout and shows real numbers immediately, then refreshes in the background and announces when it's current.
 
-**v3.0.1**
-- Added a **Classic layout** toggle (Options, the Interface panel, or `/an classic`): plain dark frames and standard Blizzard buttons instead of the painted art pack, for players who prefer the older look. The AttuneNext logo and sidebar emblem stay painted either way, and the switch applies instantly - no reload needed.
+**v3.1.1**
+- Fixed a crash opening the simple browse window before the main window had ever been opened (the engine reference is now bound lazily).
+
+**v3.1.0**
+- Added an **Unskinned layout** toggle (Options, the Interface panel, or `/an unskinned`): plain dark frames and standard Blizzard buttons instead of the painted art pack, for players who prefer the older look. The AttuneNext logo and sidebar emblem stay painted either way, and the switch applies instantly - no reload needed.
+- New **simple browse window** (`/an browse`, `/anbrowse`, or `/run AttuneNextBrowse()` in a macro): a plain standard-WoW window with just the wordmark, the browse menus and their filters - no sidebar, goals, favorites or recommendation button. It shares the main window'''s data and filter settings, so lists match exactly, and it'''s **resizable** - drag the bottom-right corner; a taller window simply shows more rows.
 
 **v2.11.1**
 - **Profession screens now show crafted items only.** Some items sit in the profession data because a quest *requires* the profession (e.g. the Light's Hope Chapel "Polar Tunic/Gloves/Bracers" turn-ins need Leatherworking 300) — those were wrongly listed on the crafting screens with a skill level. They now appear only under Quests, where they're actually obtained.

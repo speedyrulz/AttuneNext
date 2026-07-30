@@ -10,6 +10,15 @@ local Engine
 local UI = {}
 ANx.UI = UI
 
+-- Engine is cached as an upvalue for speed. Bind it lazily: the standalone
+-- windows can run the builders before the main frame is ever created.
+local function EnsureEngine()
+    if not Engine then Engine = ANx.Engine end
+    return Engine
+end
+UI.EnsureEngine = EnsureEngine
+function UI._TestClearEngine() Engine = nil end   -- regression coverage only
+
 local ROW_H = 50          -- title line + one description line, inside a card
 local VISIBLE_ROWS = 12
 local FRAME_W = 700
@@ -190,6 +199,7 @@ end
 
 -- Clicking an item row selects it: its details appear in the browse pane.
 function UI.SelectItem(id)
+    EnsureEngine()
     UI.selectedItem = id
     UI.Render()
 end
@@ -2815,7 +2825,7 @@ builders["options"] = function(view)
     optToggle("Goal window", "On-screen progress bars for your goals (shows while you have goals).",
         function() return ANx.db.goalHud end,
         function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
-    optToggle("Classic layout", "Plain frames instead of the painted art (the logo stays).",
+    optToggle("Unskinned layout", "Plain frames instead of the painted art (the logo stays).",
         function() return ANx.db.classicSkin end,
         function(v)
             ANx.db.classicSkin = v
@@ -3489,6 +3499,11 @@ end
 -- Render
 -- ---------------------------------------------------------------------
 function UI.Render()
+    EnsureEngine()
+    -- a standalone simple window can own the navigation stack
+    if UI.renderTarget and UI.renderTarget.Render then
+        return UI.renderTarget.Render()
+    end
     local f = UI.frame
     if not f or not f:IsShown() then return end
     local view = UI.Current()
@@ -3848,6 +3863,7 @@ end
 -- Show / toggle
 -- ---------------------------------------------------------------------
 function UI.Show(reset)
+    if ANx.CloseSimpleWindows then ANx.CloseSimpleWindows() end
     Engine = ANx.Engine
     if not UI.frame then
         UI.frame = CreateMainFrame()
@@ -4061,7 +4077,105 @@ function UI.UpdateHomePanel()
 end
 
 -- ---------------------------------------------------------------------
--- Layout switch: painted (default) <-> classic (plain frames, no art pack).
+-- Public helpers for the standalone "simple" windows (/an browse etc.):
+-- they reuse the very same builders and filters as the main window.
+-- ---------------------------------------------------------------------
+function UI.BuildRows(view)
+    EnsureEngine()
+    ResetRows()
+    local builder = builders[view.type]
+    if builder then builder(view) end
+    local out = {}
+    for i, r in ipairs(displayRows) do out[i] = r end
+    return out
+end
+
+-- Filter buttons that apply to a view: { label = , click = }
+function UI.FilterDefs(view)
+    EnsureEngine()
+    local out = {}
+    local function add(label, fn)
+        out[#out + 1] = { label = label, click = function()
+            fn()
+            Engine.InvalidateStats()
+        end }
+    end
+    add("Attunes: " .. ((ANx.db.scope == "account") and "Account" or "Character"), function()
+        ANx.db.scope = (ANx.db.scope == "account") and "char" or "account"
+    end)
+    local fac = ANx.db.faction or "both"
+    add("Faction: " .. ((fac == "A") and "Alliance" or (fac == "H") and "Horde" or "Both"), function()
+        local c = ANx.db.faction or "both"
+        ANx.db.faction = (c == "both") and "A" or (c == "A") and "H" or "both"
+    end)
+    add("Forge: " .. (ANx.FORGE_LABELS[ANx.ForgeLevel()] or "?"), function()
+        ANx.db.forge = (ANx.ForgeLevel() % 4) + 1
+    end)
+    local bf = ANx.db.bindFilter or "both"
+    add("Bind: " .. ((bf == "bop") and "BoP" or (bf == "boe") and "BoE" or "Both"), function()
+        local c = ANx.db.bindFilter or "both"
+        ANx.db.bindFilter = (c == "both") and "bop" or (c == "bop") and "boe" or "both"
+    end)
+    add("Accessories: " .. ((ANx.db.accessories ~= false) and "On" or "Off"), function()
+        ANx.db.accessories = not (ANx.db.accessories ~= false)
+    end)
+    add("Zone-excl: " .. (ANx.db.zoneExclusive and "On" or "Off"), function()
+        ANx.db.zoneExclusive = not ANx.db.zoneExclusive
+    end)
+    if ViewHasDifficulty(view) then
+        local d = ANx.db.difficulty or "all"
+        add("Difficulty: " .. (ANx.DIFF_TIER_LABELS[d] or "All"), function()
+            local order = { "all", "normal", "heroic", "mythic" }
+            local c = ANx.db.difficulty or "all"
+            for i, v in ipairs(order) do
+                if v == c then ANx.db.difficulty = order[(i % #order) + 1]; break end
+            end
+        end)
+    end
+    if ViewHasRaidSize(view) then
+        local sz = ANx.db.raidSize or "all"
+        add("Size: " .. (ANx.RAID_SIZE_LABELS[sz] or "All"), function()
+            local order = { "all", "10", "25" }
+            local c = ANx.db.raidSize or "all"
+            for i, v in ipairs(order) do
+                if v == c then ANx.db.raidSize = order[(i % #order) + 1]; break end
+            end
+        end)
+    end
+    if ViewHasVendorFilter(view) then
+        add("Currency: " .. (VENDOR_FILTER_LABELS[ANx.db.vendorFilter or "all"] or "All"),
+            CycleVendorFilter)
+    end
+    if ViewHasStockFilter(view) then
+        local sf = ANx.db.stockFilter or "all"
+        add("Stock: " .. ((sf == "limited") and "Limited" or (sf == "unlimited") and "Unlimited" or "All"), function()
+            local c = ANx.db.stockFilter or "all"
+            ANx.db.stockFilter = (c == "all") and "limited" or (c == "limited") and "unlimited" or "all"
+        end)
+        add("Affordable: " .. (ANx.db.affordableOnly and "On" or "Off"), function()
+            ANx.db.affordableOnly = not ANx.db.affordableOnly
+            ANx.InvalidatePlayerCurrency()
+        end)
+    end
+    if ViewIsWorldDrop(view) then
+        add("Rares only: " .. (ANx.db.raresOnly and "On" or "Off"), function()
+            ANx.db.raresOnly = not ANx.db.raresOnly
+        end)
+    end
+    if ViewSortModes(view) then
+        add("Sort: " .. (SORT_LABELS[CurrentSort(view)] or "?"), function()
+            CycleSort(view)
+        end)
+    end
+    return out
+end
+
+function UI.ViewTitleOf(view)
+    return (UI.Title and UI.Title(view)) or (view and view.title) or "?"
+end
+
+-- ---------------------------------------------------------------------
+-- Layout switch: painted (default) <-> unskinned (plain frames, no art).
 -- The AttuneNext logo and sidebar emblem stay painted in both.
 -- ---------------------------------------------------------------------
 local CLASSIC_BACKDROP = {
@@ -4180,11 +4294,11 @@ function UI.ApplySkin()
     UI.RefreshIfShown()
 end
 
-function UI.ToggleClassicSkin()
+function UI.ToggleUnskinned()
     ANx.db.classicSkin = not ANx.db.classicSkin
     if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
     UI.ApplySkin()
-    ANx.Print(ANx.db.classicSkin and "Classic layout enabled."
+    ANx.Print(ANx.db.classicSkin and "Unskinned layout enabled."
         or "Painted layout enabled.")
 end
 
@@ -4494,6 +4608,7 @@ local function PushRun(r, from)
 end
 
 function UI.AttuneNextGo()
+    EnsureEngine()
     -- context-sensitive uses the screen you launched from, so remember it
     local from = UI.Current()
     if from and (from.type == "sources" or from.type == "items") and from.launchedFrom then
