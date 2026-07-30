@@ -202,6 +202,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 - **One Options screen** behind the gear button, mirrored by the Interface Options panel.
 - **Instant data at login**: the addon saves every item's status on logout and shows real numbers immediately, then refreshes in the background and announces when it's current.
 
+**v3.0.1**
+- Added a **Classic layout** toggle (Options, the Interface panel, or `/an classic`): plain dark frames and standard Blizzard buttons instead of the painted art pack, for players who prefer the older look. The AttuneNext logo and sidebar emblem stay painted either way, and the switch applies instantly - no reload needed.
+
 **v2.11.1**
 - **Profession screens now show crafted items only.** Some items sit in the profession data because a quest *requires* the profession (e.g. the Light's Hope Chapel "Polar Tunic/Gloves/Bracers" turn-ins need Leatherworking 300) — those were wrongly listed on the crafting screens with a skill level. They now appear only under Quests, where they're actually obtained.
 - **Items nobody can attune are excluded everywhere.** If the server flags an item as not attunable at all (the tooltip's "Can't be Attuned" note), it no longer counts or shows in any list, even if the per-character check disagrees.

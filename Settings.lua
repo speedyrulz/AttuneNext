@@ -92,7 +92,14 @@ local function BuildPanel()
     controls.goalhud = MakeCheck("GoalHud", "On-screen goal progress window", LX, LY + STEP * 5,
         function() return ANx.db.goalHud end,
         function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
-    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 6,
+    controls.classic = MakeCheck("Classic", "Classic layout (no painted art)", LX, LY + STEP * 6,
+        function() return ANx.db.classicSkin end,
+        function(v)
+            ANx.db.classicSkin = v
+            if ANx.UI and ANx.UI.ApplySkin then ANx.UI.ApplySkin() end
+        end)
+
+    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 7,
         function() return ANx.debug end,
         function(v) ANx.debug = v end)
 
@@ -187,8 +194,8 @@ local function BuildPanel()
         scale:SetValue(ANx.db and ANx.db.scale or 1)
         for _, cb in pairs({ controls.minimap, controls.tooltip, controls.alerts,
                              controls.zonewatch, controls.zonehud, controls.goalhud,
-                             controls.debug, controls.ctx, controls.focus,
-                             controls.droprate }) do
+                             controls.classic, controls.debug, controls.ctx,
+                             controls.focus, controls.droprate }) do
             cb:SetChecked(cb._getter() and true or false)
         end
         runBtn:SetText("Recommend whole run: " .. (ANx.RUN_MODE_LABELS[ANx.RunMode()] or "?"))

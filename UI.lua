@@ -252,9 +252,11 @@ local function CreateMainFrame()
     if ANx.Art and ANx.Art.outer_corner_nw then
         if f.SetBackdropBorderColor then f:SetBackdropBorderColor(0, 0, 0, 0) end
         local CS, ES = 34, 18   -- corner size, edge thickness
+        f.anxChrome = {}
         local function ChromePiece(key)
             local t = f:CreateTexture(nil, "OVERLAY")
             ANx.SetArt(t, key)
+            f.anxChrome[#f.anxChrome + 1] = t
             return t
         end
         local nw = ChromePiece("outer_corner_nw")
@@ -284,6 +286,7 @@ local function CreateMainFrame()
     local sideLine = f:CreateTexture(nil, "BORDER")
     sideLine:SetPoint("TOPLEFT", SIDEBAR_W - 7, -8)
     sideLine:SetPoint("BOTTOMLEFT", SIDEBAR_W - 7, 8)
+    f.anxDivider = sideLine
     if ANx.Art and ANx.Art.divider_vertical then
         sideLine:SetWidth(6)
         ANx.SetArt(sideLine, "divider_vertical")
@@ -299,7 +302,7 @@ local function CreateMainFrame()
         local emblem = f:CreateTexture(nil, "ARTWORK")
         emblem:SetWidth(84); emblem:SetHeight(84)
         emblem:SetPoint("TOPLEFT", (SIDEBAR_W - 84) / 2, -14)
-        ANx.SetArt(emblem, "emblem")
+        ANx.SetArt(emblem, "emblem")   -- logo art stays in Classic too
         f.sideEmblem = emblem
         navTop = -116
     else
@@ -393,6 +396,16 @@ local function CreateMainFrame()
         world_drops          = { 0.6369, 0.1375, 0.7365, 0.2371 },
         wrath_of_the_lich_king = { 0.2650, 0.7651, 0.3587, 0.8587 },
     }
+    -- Classic layout: skip the painted pack (logo/emblem excepted).
+    local SKINNABLE = {}          -- textures that swap with the layout
+    local function RegisterSkin(tex, kind, key, w, h)
+        if not tex then return tex end
+        SKINNABLE[#SKINNABLE + 1] = { tex = tex, kind = kind, key = key }
+        return tex
+    end
+    local function ArtOn() return ANx.ArtOn and ANx.ArtOn() end
+    UI.ArtOn = ArtOn
+
     local function ArtTexCoord(tex, key)
         if not (tex and tex.SetTexCoord) then return end
         local tr = ART_TRIM[key]
@@ -400,8 +413,9 @@ local function CreateMainFrame()
         if tr then tex:SetTexCoord(tr[1], tr[3], tr[2], tr[4])
         elseif a then tex:SetTexCoord(a[2], a[4], a[3], a[5]) end
     end
-    local function SetArtTrim(tex, key)
+    local function SetArtTrim(tex, key, force)
         if not (ANx.Art and ANx.Art[key] and tex and tex.SetTexture) then return false end
+        if not force and not ArtOn() then return false end
         tex:SetTexture(ANx.ART_PATH .. ANx.Art[key][1])
         ArtTexCoord(tex, key)
         return true
@@ -411,6 +425,7 @@ local function CreateMainFrame()
     -- spikes, which this trims off)
     local function SetIconArt(tex, key, box)
         if not (ANx.Art and ANx.Art[key] and tex and tex.SetTexture) then return false end
+        if not ArtOn() then return false end
         tex:SetTexture(ANx.ART_PATH .. ANx.Art[key][1])
         local tr = ART_TRIM[key]
         if tr and tex.SetTexCoord then
@@ -491,9 +506,14 @@ local function CreateMainFrame()
         -- client (/an frames showed plates at native 1024px), so plates are
         -- sized like the row progress bars - one anchor + SetWidth/SetHeight
         b.anxPlate:SetWidth(b:GetWidth()); b.anxPlate:SetHeight(b:GetHeight())
-        if ANx.Art and ANx.Art[key] then
+        b.anxPlate.anxKey = key
+        if ANx.Art and ANx.Art[key] and ArtOn() then
             b.anxPlate:SetTexture(ANx.ART_PATH .. ANx.Art[key][1])
             ArtTexCoord(b.anxPlate, key)
+        elseif not ArtOn() then
+            -- classic: the familiar Blizzard panel button
+            b.anxPlate:SetTexture("Interface\\Buttons\\UI-Panel-Button-Up")
+            if b.anxPlate.SetTexCoord then b.anxPlate:SetTexCoord(0, 0.625, 0, 0.6875) end
         else
             b.anxPlate:SetTexture(0.10, 0.10, 0.13, 0.9)
         end
@@ -507,11 +527,19 @@ local function CreateMainFrame()
             b.anxHover = h
         end
         b.anxHover:SetWidth(b:GetWidth()); b.anxHover:SetHeight(b:GetHeight())
-        if ANx.Art and ANx.Art.button_hover then
+        if ANx.Art and ANx.Art.button_hover and ArtOn() then
             b.anxHover:SetTexture(ANx.ART_PATH .. ANx.Art.button_hover[1])
             ArtTexCoord(b.anxHover, "button_hover")
+        elseif not ArtOn() then
+            b.anxHover:SetTexture("Interface\\Buttons\\UI-Panel-Button-Highlight")
+            if b.anxHover.SetTexCoord then b.anxHover:SetTexCoord(0, 0.625, 0, 0.6875) end
         else
             b.anxHover:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        end
+        UI.skinButtons = UI.skinButtons or {}
+        if not b.anxSkinReg then
+            b.anxSkinReg = true
+            UI.skinButtons[#UI.skinButtons + 1] = b
         end
     end
     UI.SkinFlat = SkinFlat
@@ -551,7 +579,7 @@ local function CreateMainFrame()
         lg.anxMine = true
         lg:SetPoint("CENTER", goBtn, "CENTER", 0, 0)
         lg:SetWidth(132); lg:SetHeight(30)   -- inset: the hover border needs air
-        SetArtTrim(lg, "logo")
+        SetArtTrim(lg, "logo", true)   -- forced: the wordmark stays in Classic
         goBtn.anxLogo = lg
         f.logoTex = lg
     else
@@ -666,16 +694,19 @@ local function CreateMainFrame()
 
     -- search field: 3-slice painted skin so the border never distorts
     local sfW, sfX = 152, CX + 170
+    f.anxFieldSlices = {}
     local function FieldSlice(x, w, u0, u1)
         local t = f:CreateTexture(nil, "ARTWORK")
         t:SetWidth(w); t:SetHeight(30)
         t:SetPoint("TOPLEFT", x, -14)
-        if ANx.Art and ANx.Art.search_field then
+        if ANx.Art and ANx.Art.search_field and ArtOn() then
             t:SetTexture(ANx.ART_PATH .. ANx.Art.search_field[1])
             if t.SetTexCoord then t:SetTexCoord(u0, u1, 0.5771, 0.6738) end
         else
             t:SetTexture(0.10, 0.10, 0.13, 0.9)
         end
+        t.anxUV = { u0, u1 }
+        f.anxFieldSlices[#f.anxFieldSlices + 1] = t
         return t
     end
     f.searchBg = FieldSlice(sfX, 20, 0.0146, 0.0830)                 -- left cap
@@ -1060,7 +1091,8 @@ local function CreateMainFrame()
             ic.anxMine = true
             ic:SetWidth(24); ic:SetHeight(24)
             ic:SetPoint("LEFT", 10, 0)
-            SetIconArt(ic, NAV_ICON[def.key], 24)
+            if not SetIconArt(ic, NAV_ICON[def.key], 24) then ic:Hide() end
+            nb.anxNavIcon, nb.anxNavKey = ic, NAV_ICON[def.key]
         end
         local fs = nb.GetFontString and nb:GetFontString()
         if fs then
@@ -1182,8 +1214,10 @@ local function CreateMainFrame()
         local CARD_PAD = 30          -- safe content inset (corner + breathing room)
         local CARD_HI = 8            -- hover wash inset (stays inside the frame)
         -- attach the 9-slice card art to an existing frame (rows use this too)
+        UI.skinCards = UI.skinCards or {}
         local function AttachCard(c, cs)
             c.anxCS = cs or CARD_CS
+            UI.skinCards[#UI.skinCards + 1] = c
             local art = ANx.Art and ANx.Art.content_card
             if not art then return end
             local path = ANx.ART_PATH .. art[1]
@@ -1232,6 +1266,7 @@ local function CreateMainFrame()
             local c = CreateFrame("Button", name, parent)
             StripEngineSkin(c)
             c:SetScript("OnShow", StripEngineSkin)
+            UI.skinCards[#UI.skinCards + 1] = c
             local art = ANx.Art and ANx.Art.content_card
             if art then
                 local path = ANx.ART_PATH .. art[1]
@@ -1631,6 +1666,7 @@ local function CreateMainFrame()
     -- each list row wears its own small card (matches the dashboard style)
     if UI.AttachCard then
         for _, b in ipairs(rowButtons) do
+            b.anxNoBackdrop = true   -- classic: plain rows, no frame per row
             UI.AttachCard(b, 13)
             b.icon:ClearAllPoints()
             b.icon:SetPoint("LEFT", b, "LEFT", 12, 0)
@@ -1654,6 +1690,10 @@ local function CreateMainFrame()
 
     tinsert(UISpecialFrames, "AttuneNextFrame")
     f:Hide()
+    if UI.ApplySkin then
+        UI.frame = f          -- ApplySkin needs the handle during the build
+        UI.ApplySkin()
+    end
     return f
 end
 
@@ -2775,6 +2815,12 @@ builders["options"] = function(view)
     optToggle("Goal window", "On-screen progress bars for your goals (shows while you have goals).",
         function() return ANx.db.goalHud end,
         function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
+    optToggle("Classic layout", "Plain frames instead of the painted art (the logo stays).",
+        function() return ANx.db.classicSkin end,
+        function(v)
+            ANx.db.classicSkin = v
+            if UI.ApplySkin then UI.ApplySkin() end
+        end)
     optToggle("Debug logging", "Extra chat output for troubleshooting.",
         function() return ANx.debug end,
         function(v) ANx.debug = v end)
@@ -4012,6 +4058,134 @@ function UI.UpdateHomePanel()
         gr.bar:Hide()
         if gr.track.Hide then gr.track:Hide() end
     end
+end
+
+-- ---------------------------------------------------------------------
+-- Layout switch: painted (default) <-> classic (plain frames, no art pack).
+-- The AttuneNext logo and sidebar emblem stay painted in both.
+-- ---------------------------------------------------------------------
+local CLASSIC_BACKDROP = {
+    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true, tileSize = 16, edgeSize = 14,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 },
+}
+
+function UI.ApplySkin()
+    local f = UI.frame
+    if not f then return end
+    local painted = UI.ArtOn and UI.ArtOn()
+
+    -- window chrome: painted corners vs the plain gold border
+    for _, t in ipairs(f.anxChrome or {}) do
+        if painted then t:Show() else t:Hide() end
+    end
+    if f.SetBackdropBorderColor then
+        if painted and #(f.anxChrome or {}) > 0 then
+            f:SetBackdropBorderColor(0, 0, 0, 0)
+        else
+            f:SetBackdropBorderColor(0.45, 0.38, 0.25, 1)
+        end
+    end
+    if f.anxDivider then
+        if painted and ANx.Art and ANx.Art.divider_vertical then
+            f.anxDivider:SetWidth(6)
+            ANx.SetArt(f.anxDivider, "divider_vertical")
+        else
+            if ANx.ClearArtCoords then ANx.ClearArtCoords(f.anxDivider) end
+            f.anxDivider:SetWidth(1)
+            f.anxDivider:SetTexture(0.45, 0.38, 0.25, 0.7)
+        end
+    end
+
+    -- search field
+    for _, t in ipairs(f.anxFieldSlices or {}) do
+        if painted and ANx.Art and ANx.Art.search_field then
+            t:SetTexture(ANx.ART_PATH .. ANx.Art.search_field[1])
+            if t.SetTexCoord and t.anxUV then
+                t:SetTexCoord(t.anxUV[1], t.anxUV[2], 0.5771, 0.6738)
+            end
+        else
+            if ANx.ClearArtCoords then ANx.ClearArtCoords(t) end
+            t:SetTexture(0.10, 0.10, 0.13, 0.9)
+        end
+    end
+
+    -- buttons + chips: painted plates vs Blizzard panel buttons
+    for _, b in ipairs(UI.skinButtons or {}) do
+        if b.anxPlate then
+            local key = b.anxPlate.anxKey or "button_normal"
+            if painted and ANx.Art and ANx.Art[key] then
+                b.anxPlate:SetTexture(ANx.ART_PATH .. ANx.Art[key][1])
+                if UI.SetArtTrimmed then UI.SetArtTrimmed(b.anxPlate, key) end
+            else
+                if ANx.ClearArtCoords then ANx.ClearArtCoords(b.anxPlate) end
+                b.anxPlate:SetTexture("Interface\\Buttons\\UI-Panel-Button-Up")
+                if b.anxPlate.SetTexCoord then b.anxPlate:SetTexCoord(0, 0.625, 0, 0.6875) end
+            end
+        end
+        if b.anxHover then
+            if painted and ANx.Art and ANx.Art.button_hover then
+                b.anxHover:SetTexture(ANx.ART_PATH .. ANx.Art.button_hover[1])
+                if UI.SetArtTrimmed then UI.SetArtTrimmed(b.anxHover, "button_hover") end
+            else
+                if ANx.ClearArtCoords then ANx.ClearArtCoords(b.anxHover) end
+                b.anxHover:SetTexture("Interface\\Buttons\\UI-Panel-Button-Highlight")
+                if b.anxHover.SetTexCoord then b.anxHover:SetTexCoord(0, 0.625, 0, 0.6875) end
+            end
+        end
+        -- pack icons on chips/buttons disappear in classic
+        for _, ic in ipairs({ b.anxChipIcon, b.anxIcon }) do
+            if ic then
+                if painted and b.anxIconKey and UI.SetIconArt then
+                    if UI.SetIconArt(ic, b.anxIconKey, ic.anxBox or 18) then ic:Show() else ic:Hide() end
+                elseif painted then
+                    ic:Show()
+                else
+                    ic:Hide()
+                end
+            end
+        end
+    end
+
+    -- nav entries: icons + the active chip are art
+    for _, nb in pairs(f.navButtons or {}) do
+        if nb.anxNavIcon then
+            if painted and UI.SetIconArt and nb.anxNavKey
+               and UI.SetIconArt(nb.anxNavIcon, nb.anxNavKey, 24) then
+                nb.anxNavIcon:Show()
+            else
+                nb.anxNavIcon:Hide()
+            end
+        end
+    end
+
+    -- cards (dashboards, side pane, list rows): 9-slice art vs a plain frame
+    for _, c in ipairs(UI.skinCards or {}) do
+        if c.sTL then
+            for _, t in ipairs({ c.sTL, c.sTR, c.sBL, c.sBR, c.sT, c.sB, c.sL, c.sR, c.sC }) do
+                if painted then t:Show() else t:Hide() end
+            end
+        end
+        if c.SetBackdrop then
+            if painted or c.anxNoBackdrop then
+                c:SetBackdrop(nil)
+            else
+                c:SetBackdrop(CLASSIC_BACKDROP)
+                if c.SetBackdropColor then c:SetBackdropColor(0.05, 0.05, 0.07, 0.92) end
+                if c.SetBackdropBorderColor then c:SetBackdropBorderColor(0.45, 0.38, 0.25, 1) end
+            end
+        end
+    end
+    UI.RefreshIfShown()
+end
+
+function UI.ToggleClassicSkin()
+    ANx.db.classicSkin = not ANx.db.classicSkin
+    if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+    UI.ApplySkin()
+    ANx.Print(ANx.db.classicSkin and "Classic layout enabled."
+        or "Painted layout enabled.")
 end
 
 -- ---------------------------------------------------------------------
