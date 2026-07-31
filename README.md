@@ -177,6 +177,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.2.1**
+- **Performance**: the first click on a menu entry no longer hitches. Run rankings and the What'''s Left report are now built on the background pump (10ms per frame) and cached until something actually changes, instead of being recomputed inline on every render - screens paint immediately and fill in a moment later. Per-clear drop odds are memoized, and two callers waiting on the same background job both get their result.
+
 **v3.2.0**
 - Recommendations now factor in **how long a run takes** and **how many of each mob you actually kill**. Clear times for all 73 dungeons and raids (per difficulty - mythic and each raid size have their own) are built in, and static spawn counts for ~4,900 loot-bearing creatures turn a per-kill drop chance into a realistic per-clear chance: 2.5% off 40 trash spawns is now correctly rated above 20% off a single boss. Runs are ranked by **expected new attunes per unit of time**, so a 15-minute dungeon can beat a 2-hour raid, and every recommendation shows its run length (e.g. *0.3x avg run*). Goal clear estimates use the same math.
 

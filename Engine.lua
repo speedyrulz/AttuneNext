@@ -21,6 +21,13 @@ local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill
 local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
 local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
 local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
+local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
+local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
+
+-- Bumped whenever anything that affects counts changes (filters, attunes,
+-- scans). Caches key off it instead of being cleared everywhere by hand.
+Engine.rev = 0
+local function BumpRev() Engine.rev = Engine.rev + 1 end
 
 function Engine.InvalidateRemaining()
     remainingCache = nil
@@ -29,6 +36,9 @@ end
 function Engine.InvalidateStats()
     statsCache = {}
     remainingCache = nil
+    clearChanceCache = {}
+    runsCache = {}
+    BumpRev()
 end
 
 function Engine.InvalidateAll()
@@ -39,6 +49,9 @@ function Engine.InvalidateAll()
     limitedItemsSet = nil
     eventItemsCache = {}
     remainingCache = nil
+    clearChanceCache = {}
+    runsCache = {}
+    BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
     Engine.scanning = false
@@ -202,14 +215,22 @@ pumpFrame:SetScript("OnUpdate", function()
             pcall(Engine.ExportCache)
         end
         if job.onDone then pcall(job.onDone) end
+        for _, cb in ipairs(job.extra or {}) do pcall(cb) end
     end
 end)
 
 function Engine.Enqueue(fn, onDone, tag)
-    -- avoid duplicate queued jobs for the same tag
+    -- one job per tag: a second caller waiting on the same work gets its
+    -- callback chained onto the queued job instead of being dropped
     if tag then
         for _, j in ipairs(Engine.scanJobs) do
-            if j.tag == tag then return end
+            if j.tag == tag then
+                if onDone then
+                    j.extra = j.extra or {}
+                    j.extra[#j.extra + 1] = onDone
+                end
+                return
+            end
         end
     end
     table.insert(Engine.scanJobs, { co = coroutine.create(fn), onDone = onDone, tag = tag })
@@ -593,7 +614,26 @@ end
 --   curNames  = currency names sorted by account need (Gold last)
 --   curItems  = { char = { [currency] = {ids} }, acct = ... } for drill-downs
 --   craftProf = [itemId] = professionName for every craftable
-function Engine.RemainingReport()
+-- Is the What's Left report already built? (cheap check for the UI)
+function Engine.RemainingReady()
+    return remainingCache ~= nil
+end
+
+-- Build it on the background pump, then call back.
+function Engine.RemainingAsync(onDone)
+    if remainingCache then
+        if onDone then onDone(remainingCache) end
+        return remainingCache
+    end
+    Engine.Enqueue(function()
+        Engine.RemainingReport(true)
+    end, function()
+        if onDone then onDone(remainingCache) end
+    end, "remaining")
+    return nil
+end
+
+function Engine.RemainingReport(yielding)
     if remainingCache then return remainingCache end
     local r = {
         char = { attunes = 0, crafted = 0, cur = {} },
@@ -604,6 +644,7 @@ function Engine.RemainingReport()
     }
     for _, prof in ipairs(ANx.ProfessionOrder or {}) do
         for exp = 1, 3 do
+            if yielding then Engine.MaybeYield() end
             for _, e in ipairs(Engine.ProfessionEntries(prof, exp)) do
                 r.craftProf[e.id] = prof
             end
@@ -613,6 +654,7 @@ function Engine.RemainingReport()
     r.ready = ready
     local seenCur = {}
     for _, id in ipairs(universe) do
+        if yielding then Engine.MaybeYield() end
         local costs
         for _, scope in ipairs({ "char", "acct" }) do
             if Engine.ScopeLeft(id, scope) then
@@ -1410,14 +1452,27 @@ function Engine.SpawnCount(objId)
 end
 
 -- Chance (0..1) that a full clear yields at least one of this item.
+-- Memoized: BestSource walks every source of the item, and the ranker asks
+-- for thousands of these on the first pass.
 function Engine.ClearChance(itemId, zoneName, srcFilter)
+    local ck = itemId .. "|" .. (zoneName or "")
+    local hit = clearChanceCache[ck]
+    if hit then return hit[1], hit[2] end
     local chance, srcName, srcType, restricted, zname, src = Engine.BestSource(itemId, zoneName, srcFilter)
-    if not chance or chance <= 0 then return 0, srcName end
-    local p = chance / 100
-    if p >= 1 then return 1, srcName end
-    local n = Engine.SpawnCount(src and src.objId)
-    if n <= 1 then return p, srcName end
-    return 1 - (1 - p) ^ n, srcName
+    local out
+    if not chance or chance <= 0 then
+        out = 0
+    else
+        local p = chance / 100
+        if p >= 1 then
+            out = 1
+        else
+            local n = Engine.SpawnCount(src and src.objId)
+            out = (n <= 1) and p or (1 - (1 - p) ^ n)
+        end
+    end
+    clearChanceCache[ck] = { out, srcName }
+    return out, srcName
 end
 
 -- How long a run takes, as a multiple of an average run (1.0). Dungeons use
@@ -1459,7 +1514,7 @@ end
 -- Ranked list of instance runs (each = a specific instance + difficulty),
 -- best first by expected new attunes per clear. Honors all filters + difficulty
 -- + Context + the ignored-instance list.
-function Engine.RankInstanceRuns(view)
+function Engine.RankInstanceRuns(view, yielding)
     local a = ANx.db and ANx.db.anext or {}
     local ignoreInst = a.ignoreInst or {}
     local exps, kinds = InstanceScope(view)
@@ -1467,6 +1522,7 @@ function Engine.RankInstanceRuns(view)
     for _, exp in ipairs(exps) do
         for _, kind in ipairs(kinds) do
             for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
+                if yielding then Engine.MaybeYield() end
                 for _, d in ipairs(Engine.InstanceDiffs(inst)) do
                     if ANx.DifficultyMatches(d.label) then
                         local instKey = inst.map .. ":" .. d.diff
@@ -1513,11 +1569,12 @@ local function ZoneRunSrc()
     return zoneRunSrc
 end
 
-function Engine.RankZoneRuns(view)
+function Engine.RankZoneRuns(view, yielding)
     local a = ANx.db and ANx.db.anext or {}
     local ignoreInst = a.ignoreInst or {}
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
+        if yielding then Engine.MaybeYield() end
         local key = "z:" .. z.zone
         if not ignoreInst[key] then
             local expected, count, items = 0, 0, {}
@@ -1549,17 +1606,30 @@ end
 
 -- Unified run ranking for the AttuneNext button, honoring the run mode:
 -- "D"/"R"/"DR" = instances of those kinds, "Z" = zones, "all" = everything.
-function Engine.RankRuns(view, mode)
+-- Context key: rankings differ per screen only when Context sensitive is on.
+local function RunsKey(view, mode)
+    local a = ANx.db and ANx.db.anext or {}
+    local ctx = ""
+    if a.context and view then
+        ctx = (view.type or "") .. ":" .. tostring(view.exp or "") .. ":" .. tostring(view.kind or view.content or "")
+    end
+    return (mode or "DR") .. "|" .. ctx
+end
+
+function Engine.RankRuns(view, mode, yielding)
     mode = mode or "DR"
+    local key = RunsKey(view, mode)
+    local c = runsCache[key]
+    if c and c.rev == Engine.rev then return c.runs end
     local runs = {}
     if mode ~= "Z" then
         local only = (mode == "D" and "D") or (mode == "R" and "R") or nil
-        for _, r in ipairs(Engine.RankInstanceRuns(view)) do
+        for _, r in ipairs(Engine.RankInstanceRuns(view, yielding)) do
             if not only or r.kind == only then runs[#runs + 1] = r end
         end
     end
     if mode == "Z" or mode == "all" then
-        for _, r in ipairs(Engine.RankZoneRuns(view)) do runs[#runs + 1] = r end
+        for _, r in ipairs(Engine.RankZoneRuns(view, yielding)) do runs[#runs + 1] = r end
     end
     table.sort(runs, function(x, y)
         local sx, sy = x.score or x.expected, y.score or y.expected
@@ -1567,7 +1637,34 @@ function Engine.RankRuns(view, mode)
         if x.expected ~= y.expected then return x.expected > y.expected end
         return x.count > y.count
     end)
+    runsCache[key] = { rev = Engine.rev, runs = runs }
     return runs
+end
+
+-- Ready-made ranking if it is already cached, else nil (no work done).
+function Engine.RunsCached(view, mode)
+    local c = runsCache[RunsKey(view, mode or "DR")]
+    if c and c.rev == Engine.rev then return c.runs end
+    return nil
+end
+
+-- Rank in the background (10ms/frame budget) and call back when done. The UI
+-- uses this so opening a screen never blocks on a full pass over every
+-- instance, difficulty and item.
+function Engine.RankRunsAsync(view, mode, onDone)
+    mode = mode or "DR"
+    local ready = Engine.RunsCached(view, mode)
+    if ready then
+        if onDone then onDone(ready) end
+        return ready
+    end
+    local key = RunsKey(view, mode)
+    Engine.Enqueue(function()
+        Engine.RankRuns(view, mode, true)
+    end, function()
+        if onDone then onDone(Engine.RunsCached(view, mode) or {}) end
+    end, "runs:" .. key)
+    return nil
 end
 
 -- ---------------------------------------------------------------------

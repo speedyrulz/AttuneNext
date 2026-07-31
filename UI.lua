@@ -3945,7 +3945,13 @@ function UI.UpdateHomePanel()
     local mode = ANx.RunMode()
     local have = false
     if mode ~= "off" then
-        local runs = Engine.RankRuns(view, mode)
+        -- cached ranking if we have one, otherwise rank in the background and
+        -- refresh when it lands (opening a screen must never hitch)
+        local runs = Engine.RunsCached(view, mode)
+        if not runs then
+            Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+            runs = {}
+        end
         local r = runs[1]
         if r then
             have = true
@@ -3992,7 +3998,11 @@ function UI.UpdateHomePanel()
     if not have then
         rec.icon:Hide()
         rec.anxIconKey = nil
-        if Engine.scanning then
+        if mode ~= "off" and not Engine.RunsCached(view, mode) then
+            rec.title:SetText("|cff888888Finding the best run...|r")
+            rec.line1:SetText("")
+            rec.line2:SetText("")
+        elseif Engine.scanning then
             rec.title:SetText("|cff888888Scanning the item database...|r")
             rec.line1:SetText("Recommendations appear when the scan finishes.")
         else
@@ -4318,6 +4328,26 @@ function UI.UpdateWLPanel()
     local f = UI.frame
     local wl = f and f.wlPanel
     if not wl then return end
+    -- building the report walks every profession, vendor and item, so do it on
+    -- the background pump the first time and fill the cards in when it lands
+    if not Engine.RemainingReady() then
+        wl.attunes.num:SetText("|cff888888...|r")
+        wl.crafted.num:SetText("|cff888888...|r")
+        wl.currency.num:SetText("|cff888888...|r")
+        UI.FitText(wl.attunes.sub, "|cffbfae86working it out...|r", 200)
+        wl.crafted.sub:SetText(""); wl.currency.sub:SetText("")
+        for e = 1, 3 do
+            wl.exps.rows[e].right:SetText("|cff888888...|r")
+            wl.exps.rows[e].bar:Hide()
+        end
+        for i = 1, 4 do
+            local row = wl.mats.rows[i]
+            row.icon:Hide(); row.name:SetText(""); row.need:SetText(""); row.own:SetText("")
+        end
+        UI.FitText(wl.mats.rows[1].name, "|cff888888Adding up your materials...|r", 300)
+        Engine.RemainingAsync(function() UI.RefreshIfShown() end)
+        return
+    end
     local r = Engine.RemainingReport()
     local sc = (ANx.db.scope == "account") and "acct" or "char"
     local scName = (sc == "acct") and "account-wide" or "this character"
@@ -4501,7 +4531,14 @@ function UI.UpdateSidePane()
     -- ---------- context recommendation for THIS screen ----------
     local rc = sp.rec
     local mode = ANx.RunMode()
-    local runs = (mode ~= "off") and Engine.RankRuns(view, mode) or nil
+    local runs
+    if mode ~= "off" then
+        runs = Engine.RunsCached(view, mode)
+        if not runs then
+            Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+        end
+    end
+    local pending = (mode ~= "off") and not runs
     local r = runs and runs[1]
     local trackGoal
     if r then
@@ -4519,6 +4556,11 @@ function UI.UpdateSidePane()
         rc.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d left%s",
             r.expected, r.count, r.time and ("  |cff888888" .. UI.TimeTag(r) .. "|r") or ""))
         rc.icon:Show()
+    elseif pending then
+        rc.icon:Hide()
+        rc.name:SetText("|cff888888Finding the best run...|r")
+        rc.line1:SetText("")
+        rc.line2:SetText("")
     else
         local pick = Engine.AttuneNextPick(view, { forceContext = true })
             or Engine.AttuneNextPick(view)
