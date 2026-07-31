@@ -177,6 +177,12 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.2.0**
+- Recommendations now factor in **how long a run takes** and **how many of each mob you actually kill**. Clear times for all 73 dungeons and raids (per difficulty - mythic and each raid size have their own) are built in, and static spawn counts for ~4,900 loot-bearing creatures turn a per-kill drop chance into a realistic per-clear chance: 2.5% off 40 trash spawns is now correctly rated above 20% off a single boss. Runs are ranked by **expected new attunes per unit of time**, so a 15-minute dungeon can beat a 2-hour raid, and every recommendation shows its run length (e.g. *0.3x avg run*). Goal clear estimates use the same math.
+
+**v3.1.2**
+- Fixed the *"Fully attuned - swap it for the next one!"* alert firing on every attune **progress tick** for an equipped item instead of only when it actually finishes. It now checks real progress and announces once per item.
+
 **v3.1.1**
 - Fixed a crash opening the simple browse window before the main window had ever been opened (the engine reference is now bound lazily).
 

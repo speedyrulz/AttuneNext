@@ -256,6 +256,7 @@ end
 
 -- Best source for an item, preferring sources in the given zone name + src filter.
 -- Returns chance, sourceName, srcType, restricted(bool), zoneName
+-- returns chance, sourceName, srcType, restricted, zoneName, sourceRecord
 function Engine.BestSource(itemId, zoneName, srcFilter)
     local best, bestAny
     for _, s in ipairs(Engine.Sources(itemId)) do
@@ -267,8 +268,8 @@ function Engine.BestSource(itemId, zoneName, srcFilter)
             end
         end
     end
-    if best then return best.chance, best.objName, best.srcType, true, best.zoneName end
-    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName end
+    if best then return best.chance, best.objName, best.srcType, true, best.zoneName, best end
+    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName, bestAny end
     return nil
 end
 
@@ -1394,6 +1395,51 @@ function Engine.RandomUnattuned(view)
 end
 
 -- ---------------------------------------------------------------------
+-- Realistic per-clear odds and run length
+-- ---------------------------------------------------------------------
+-- A drop chance is per kill. Trash that spawns 40 times over a clear is a very
+-- different proposition to a single boss with the same chance, so convert to
+-- "at least one drop in a full clear": 1 - (1-p)^n.
+local SPAWN_CAP = 60      -- sanity cap: nobody clears more than this of one mob
+
+function Engine.SpawnCount(objId)
+    local n = objId and ANx.MobCount and ANx.MobCount[objId]
+    if not n or n < 1 then return 1 end
+    if n > SPAWN_CAP then return SPAWN_CAP end
+    return n
+end
+
+-- Chance (0..1) that a full clear yields at least one of this item.
+function Engine.ClearChance(itemId, zoneName, srcFilter)
+    local chance, srcName, srcType, restricted, zname, src = Engine.BestSource(itemId, zoneName, srcFilter)
+    if not chance or chance <= 0 then return 0, srcName end
+    local p = chance / 100
+    if p >= 1 then return 1, srcName end
+    local n = Engine.SpawnCount(src and src.objId)
+    if n <= 1 then return p, srcName end
+    return 1 - (1 - p) ^ n, srcName
+end
+
+-- How long a run takes, as a multiple of an average run (1.0). Dungeons use
+-- one time for normal/heroic and a separate mythic time; raids are per size.
+function Engine.RunTime(map, diffLabel)
+    local t = ANx.InstanceTime and ANx.InstanceTime[map]
+    if not t then return 1 end
+    local lbl = diffLabel or ""
+    -- every mythic time in the data is exactly 10x its normal run, so classic
+    -- dungeons (which have no mythic row) follow the same relationship
+    if lbl == "M" then
+        if t["M"] then return t["M"] end
+        if t["*"] then return t["*"] * 10 end
+        return 10
+    end
+    if t[lbl] then return t[lbl] end
+    local sized = lbl:gsub("N$", "")           -- 10N/25N share the 10/25 time
+    if t[sized] then return t[sized] end
+    return t["*"] or t["10"] or t["25"] or 1
+end
+
+-- ---------------------------------------------------------------------
 -- Instance-run recommendations (expected new attunes per run)
 -- ---------------------------------------------------------------------
 -- Which (expansion, kind) pairs to consider, given the view and Context option.
@@ -1429,14 +1475,16 @@ function Engine.RankInstanceRuns(view)
                             for _, id in ipairs(d.items) do
                                 if Engine.Eligible(id) and not ANx.CountDone(id) then
                                     count = count + 1
-                                    local chance = Engine.BestSource(id, inst.name, ANx.INSTANCE_DROP_SRC) or 0
-                                    if chance > 0 then expected = expected + chance / 100 end
+                                    expected = expected
+                                        + Engine.ClearChance(id, inst.name, ANx.INSTANCE_DROP_SRC)
                                 end
                             end
                             if count > 0 then
+                                local rt = Engine.RunTime(inst.map, d.label)
                                 runs[#runs + 1] = {
                                     inst = inst, d = d, expected = expected,
                                     count = count, instKey = instKey, kind = kind,
+                                    time = rt, score = expected / math.max(rt, 0.02),
                                 }
                             end
                         end
@@ -1446,6 +1494,8 @@ function Engine.RankInstanceRuns(view)
         end
     end
     table.sort(runs, function(x, y)
+        local sx, sy = x.score or x.expected, y.score or y.expected
+        if sx ~= sy then return sx > sy end
         if x.expected ~= y.expected then return x.expected > y.expected end
         return x.count > y.count
     end)
@@ -1473,21 +1523,24 @@ function Engine.RankZoneRuns(view)
             local expected, count, items = 0, 0, {}
             for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
                 if Engine.Eligible(id) and not ANx.CountDone(id) then
-                    local chance = Engine.BestSource(id, z.name, ZoneRunSrc())
-                    if chance and chance > 0 then
+                    local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())
+                    if cc > 0 then
                         count = count + 1
                         items[#items + 1] = id
-                        expected = expected + math.min(chance, 100) / 100
+                        expected = expected + cc
                     end
                 end
             end
             if count > 0 then
+                -- a zone sweep is treated as one average-length run
                 runs[#runs + 1] = { zone = z, expected = expected, count = count,
-                    instKey = key, items = items }
+                    instKey = key, items = items, time = 1, score = expected }
             end
         end
     end
     table.sort(runs, function(x, y)
+        local sx, sy = x.score or x.expected, y.score or y.expected
+        if sx ~= sy then return sx > sy end
         if x.expected ~= y.expected then return x.expected > y.expected end
         return x.count > y.count
     end)
@@ -1509,6 +1562,8 @@ function Engine.RankRuns(view, mode)
         for _, r in ipairs(Engine.RankZoneRuns(view)) do runs[#runs + 1] = r end
     end
     table.sort(runs, function(x, y)
+        local sx, sy = x.score or x.expected, y.score or y.expected
+        if sx ~= sy then return sx > sy end
         if x.expected ~= y.expected then return x.expected > y.expected end
         return x.count > y.count
     end)
@@ -1560,10 +1615,10 @@ local function InstanceClears(inst, diff)
             for _, id in ipairs(d.items) do
                 if not seen[id] and Engine.Eligible(id) and not ANx.CountDone(id) then
                     seen[id] = true
-                    local chance = Engine.BestSource(id, inst.name, ANx.INSTANCE_DROP_SRC) or 0
-                    if chance > 0 then
+                    local cc = Engine.ClearChance(id, inst.name, ANx.INSTANCE_DROP_SRC)
+                    if cc > 0 then
                         leftDrop = leftDrop + 1
-                        expected = expected + chance / 100
+                        expected = expected + cc
                     else
                         noDrop = noDrop + 1
                     end

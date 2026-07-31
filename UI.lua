@@ -2961,9 +2961,10 @@ builders["items"] = function(view)
             text = "|cffffd100" .. (view.title or "?") .. "|r",
             right = string.format("|cff00ff88~%.1f|r%s", view.runExpected or 0,
                 view.zoneRun and "" or "|cff888888/clear|r"),
-            sub = string.format("Recommended %s: ~%.1f new attunes%s  -  click: ignore",
+            sub = string.format("Recommended %s: ~%.1f new attunes%s%s  -  click: ignore",
                 view.zoneRun and "zone" or "run", view.runExpected or 0,
-                view.zoneRun and "" or " per clear"),
+                view.zoneRun and "" or " per clear",
+                view.runTime and (", " .. string.format("%.2gx avg run", view.runTime)) or ""),
             onClick = function() UI.AttuneNextIgnoreInstance(view.instKey, view.launchedFrom) end,
         })
     end
@@ -3893,6 +3894,13 @@ end
 -- its source detail. (WoW's Lua has no math.randomseed; math.random is already
 -- seeded by the client.)
 -- format a difficulty label suffix, e.g. " (25 Heroic)"
+-- "0.3x avg run" / "2.5x avg run": how long this clear takes vs the average
+function UI.TimeTag(r)
+    local t = r and r.time
+    if not t or t <= 0 then return "" end
+    return string.format("%.2gx avg run", t)
+end
+
 local function RunLabel(d)
     if not d or d.label == "" then return "" end
     return " (" .. (DIFF_LABELS[d.label] or d.label) .. ")"
@@ -3954,7 +3962,8 @@ function UI.UpdateHomePanel()
                 UI.SetIconArt(rec.icon, rec.anxIconKey, 68)
                 rec.title:SetText("|cffffd100" .. r.inst.name .. RunLabel(r.d) .. "|r")
                 rec.line1:SetText("|cffbfae86Best run|r  -  "
-                    .. string.format("|cff00ff88~%.1f new attunes per clear|r", r.expected))
+                    .. string.format("|cff00ff88~%.1f per clear|r  |cff888888(%s)|r",
+                        r.expected, UI.TimeTag(r)))
                 rec.line2:SetText(r.count .. " items left in there")
             end
             rec.icon:Show()
@@ -4507,7 +4516,8 @@ function UI.UpdateSidePane()
             rc.line1:SetText("|cffbfae86Best run here|r")
             trackGoal = { kind = "inst", map = r.inst.map, diff = r.d.label }
         end
-        rc.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d left", r.expected, r.count))
+        rc.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d left%s",
+            r.expected, r.count, r.time and ("  |cff888888" .. UI.TimeTag(r) .. "|r") or ""))
         rc.icon:Show()
     else
         local pick = Engine.AttuneNextPick(view, { forceContext = true })
@@ -4593,16 +4603,16 @@ local function PushRun(r, from)
         UI.Push({ type = "items", title = r.zone.name, items = r.items,
             zoneName = r.zone.name, worldDrop = true,
             fromAttuneNextRun = true, zoneRun = true,
-            runExpected = r.expected, runCount = r.count,
+            runExpected = r.expected, runCount = r.count, runTime = r.time,
             instKey = r.instKey, launchedFrom = from })
     else
         local lbl = RunLabel(r.d)
-        ANx.Print(string.format("Best run: |cffffff00%s%s|r  -  ~%.1f expected new attunes (%d left)",
-            r.inst.name, lbl, r.expected, r.count))
+        ANx.Print(string.format("Best run: |cffffff00%s%s|r  -  ~%.1f expected new attunes (%d left, %s)",
+            r.inst.name, lbl, r.expected, r.count, UI.TimeTag(r)))
         UI.Push({ type = "items", title = r.inst.name .. lbl, items = r.d.items,
             zoneName = r.inst.name, srcFilter = ANx.INSTANCE_DROP_SRC,
             fromAttuneNextRun = true, runExpected = r.expected, runCount = r.count,
-            instKey = r.instKey, launchedFrom = from,
+            runTime = r.time, instKey = r.instKey, launchedFrom = from,
             instMap = r.inst.map, instName = r.inst.name, instDiff = r.d.label })
     end
 end

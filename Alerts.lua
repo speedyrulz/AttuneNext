@@ -63,12 +63,23 @@ end
 -- "Swap it out": an equipped item just finished attuning
 -- (called from the OnCustomGameData chain, typeId 11 = ATTUNE_HAS)
 -- ---------------------------------------------------------------------
+-- The server's ATTUNE_HAS event fires on EVERY progress change, not just on
+-- completion, so verify the item is actually finished (and only say so once).
+local announcedDone = {}
+
 function ANx.OnAttuneCompleted(itemId)
     if not (ANx.db and ANx.db.alerts) then return end
     if not (itemId and _G.GetInventoryItemLink) then return end
+    local pct = ANx.Progress(itemId) or 0
+    if pct < 100 then
+        announcedDone[itemId] = nil   -- re-armed if it somehow drops back
+        return
+    end
+    if announcedDone[itemId] then return end
     for slot = 1, 19 do
         local id = ItemIdFromLink(_G.GetInventoryItemLink("player", slot))
         if id == itemId then
+            announcedDone[itemId] = true
             local name, link = ANx.GetItemDisplay(itemId)
             Announce("|cff00ff00Fully attuned:|r " .. tostring(link or name or itemId)
                 .. " |cffffd100- swap it for the next one!|r")
