@@ -2825,6 +2825,31 @@ builders["options"] = function(view)
     optToggle("Goal window", "On-screen progress bars for your goals (shows while you have goals).",
         function() return ANx.db.goalHud end,
         function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
+    do
+        local mode = ANx.TimeMode()
+        AddRow({
+            text = "Run length:  |cffffd100" .. (ANx.TIME_MODE_LABELS[mode] or "?") .. "|r",
+            sub = (mode == "off")
+                and "Recommendations ignore how long a run takes."
+                or ((mode == "personal")
+                    and "Only instances you have seen a Dungeon Challenge time for are weighted."
+                    or ((mode == "builtin")
+                        and "Uses the built-in clear-time estimates for every instance."
+                        or "Built-in estimates, replaced by Dungeon Challenge times where known.")),
+            onClick = function()
+                local cur = ANx.TimeMode()
+                for i, m in ipairs(ANx.TIME_MODES) do
+                    if m == cur then
+                        ANx.db.timeMode = ANx.TIME_MODES[(i % #ANx.TIME_MODES) + 1]
+                        break
+                    end
+                end
+                Engine.InvalidateStats()
+                if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+                UI.Render()
+            end,
+        })
+    end
     optToggle("Unskinned layout", "Plain frames instead of the painted art (the logo stays).",
         function() return ANx.db.classicSkin end,
         function(v)
@@ -3896,8 +3921,15 @@ end
 -- format a difficulty label suffix, e.g. " (25 Heroic)"
 -- "0.3x avg run" / "2.5x avg run": how long this clear takes vs the average
 function UI.TimeTag(r)
+    if ANx.TimeMode and ANx.TimeMode() == "off" then return "" end
     local t = r and r.time
     if not t or t <= 0 then return "" end
+    local map = r.inst and r.inst.map
+    local lbl = r.d and r.d.label
+    local measured = map and ANx.MeasuredRunSeconds and ANx.MeasuredRunSeconds(map, lbl)
+    if measured then
+        return string.format("challenge %s", ANx.FormatRunTime(measured))
+    end
     return string.format("%.2gx avg run", t)
 end
 
@@ -3949,7 +3981,11 @@ function UI.UpdateHomePanel()
         -- refresh when it lands (opening a screen must never hitch)
         local runs = Engine.RunsCached(view, mode)
         if not runs then
-            Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+            -- ranking before the scans finish would be redone every time a
+            -- summary lands, which is what made login sluggish
+            if Engine.SummariesReady() then
+                Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+            end
             runs = {}
         end
         local r = runs[1]
@@ -3999,7 +4035,9 @@ function UI.UpdateHomePanel()
         rec.icon:Hide()
         rec.anxIconKey = nil
         if mode ~= "off" and not Engine.RunsCached(view, mode) then
-            rec.title:SetText("|cff888888Finding the best run...|r")
+            rec.title:SetText(Engine.SummariesReady()
+                and "|cff888888Finding the best run...|r"
+                or "|cff888888Scanning the item database...|r")
             rec.line1:SetText("")
             rec.line2:SetText("")
         elseif Engine.scanning then
@@ -4534,7 +4572,7 @@ function UI.UpdateSidePane()
     local runs
     if mode ~= "off" then
         runs = Engine.RunsCached(view, mode)
-        if not runs then
+        if not runs and Engine.SummariesReady() then
             Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
         end
     end
@@ -4551,14 +4589,18 @@ function UI.UpdateSidePane()
             UI.SetIconArt(rc.icon, (ANx.Art and ANx.Art[thumb]) and thumb or "dungeons", 48)
             UI.FitText(rc.name, "|cffffd100" .. r.inst.name .. RunLabel(r.d) .. "|r", (SIDE_W - 116) * 2)
             rc.line1:SetText("|cffbfae86Best run here|r")
-            trackGoal = { kind = "inst", map = r.inst.map, diff = r.d.label }
+            trackGoal = { kind = "inst", map = r.inst.map, name = r.inst.name,
+                          diff = r.d.label,
+                          diffText = ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[r.d.label] }
         end
         rc.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d left%s",
             r.expected, r.count, r.time and ("  |cff888888" .. UI.TimeTag(r) .. "|r") or ""))
         rc.icon:Show()
     elseif pending then
         rc.icon:Hide()
-        rc.name:SetText("|cff888888Finding the best run...|r")
+        rc.name:SetText(Engine.SummariesReady()
+            and "|cff888888Finding the best run...|r"
+            or "|cff888888Scanning...|r")
         rc.line1:SetText("")
         rc.line2:SetText("")
     else
@@ -4586,7 +4628,9 @@ function UI.UpdateSidePane()
     -- track-goal button: instance screens + instance recommendations
     local goal
     if view.type == "items" and view.instMap then
-        goal = { kind = "inst", map = view.instMap, diff = view.instDiff }
+        goal = { kind = "inst", map = view.instMap, name = view.instName,
+                 diff = view.instDiff,
+                 diffText = ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[view.instDiff or ""] }
     elseif view.type == "instances" then
         goal = { kind = "content", exp = view.exp, content = view.kind }
     elseif trackGoal then

@@ -177,6 +177,13 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.3.0**
+- **Run length can now weigh in on recommendations**, off by default. The **Run length** setting (Options, the Interface panel, or `/an timemode`) offers **Off** (ignore how long a run takes), **Built-in estimates** (shipped clear times for all 73 dungeons and raids, per difficulty), **Personal times only** (just the instances you have a Dungeon Challenge time for - anything else stays neutral), and **Built-in + personal** (estimates, replaced by challenge times where known). Times are measured against a **1.00x = 15:00** baseline, so a 7:30 clear reads as 0.50x.
+- **Personal times come from Synastria's Dungeon Challenge buff**, read off your auras when you enter an instance - the addon never times you and records nothing itself. Each difficulty is tracked separately and the times are account-wide. `/an times` lists them, `/an times reset` clears them.
+- Recommendations show the run length they used - *"0.3x avg run"*, or *"challenge 8:30"* where a challenge time is known.
+- **Performance**: opening a screen no longer hitches. Run rankings and the What's Left report are built on a background pump (10ms per frame) and cached until something actually changes, and ranking waits for the item scans to finish rather than being redone every time one lands.
+- Fixed goal names showing as *"Instance 603"* - they now resolve from the instance and difficulty, so two difficulties of the same raid are told apart.
+
 **v3.2.1**
 - **Performance**: the first click on a menu entry no longer hitches. Run rankings and the What'''s Left report are now built on the background pump (10ms per frame) and cached until something actually changes, instead of being recomputed inline on every render - screens paint immediately and fill in a moment later. Per-clear drop odds are memoized, and two callers waiting on the same background job both get their result.
 

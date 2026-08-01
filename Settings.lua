@@ -130,8 +130,24 @@ local function BuildPanel()
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end)
 
+    local timeBtn = CreateFrame("Button", "AttuneNextTimeModeBtn", panel, "UIPanelButtonTemplate")
+    timeBtn:SetWidth(268); timeBtn:SetHeight(22)
+    timeBtn:SetPoint("TOPLEFT", RX + 2, RY + STEP * 4 - 4)
+    timeBtn:SetScript("OnClick", function(self)
+        local cur = ANx.TimeMode()
+        for i, m in ipairs(ANx.TIME_MODES) do
+            if m == cur then
+                ANx.db.timeMode = ANx.TIME_MODES[(i % #ANx.TIME_MODES) + 1]
+                break
+            end
+        end
+        self:SetText("Run length: " .. (ANx.TIME_MODE_LABELS[ANx.TimeMode()] or "?"))
+        if ANx.Engine then ANx.Engine.InvalidateStats() end
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end)
+
     local anNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    anNote:SetPoint("TOPLEFT", RX + 4, RY + STEP * 4 - 10)
+    anNote:SetPoint("TOPLEFT", RX + 4, RY + STEP * 5 - 8)
     anNote:SetWidth(270); anNote:SetJustifyH("LEFT")
     anNote:SetText("|cff888888The category you're browsing always wins - on a Quests / Vendor / Profession screen the pick comes from it.|r")
 
@@ -199,6 +215,7 @@ local function BuildPanel()
             cb:SetChecked(cb._getter() and true or false)
         end
         runBtn:SetText("Recommend whole run: " .. (ANx.RUN_MODE_LABELS[ANx.RunMode()] or "?"))
+        timeBtn:SetText("Run length: " .. (ANx.TIME_MODE_LABELS[ANx.TimeMode()] or "?"))
         ignoreBtn:SetText("Reset ignore list (" .. IgnoreCount() .. ")")
     end
     panel.okay = function() end

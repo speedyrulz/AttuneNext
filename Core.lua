@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.2.1"
+ANx.VERSION = "3.3.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -26,6 +26,13 @@ ANx.DIFF_SIZE = {  -- nil = size-agnostic (dungeons, single-difficulty raids)
     ["10N"] = "10", ["25N"] = "25", ["10H"] = "10", ["25H"] = "25",
 }
 ANx.DIFF_TIER_LABELS = { all = "All", normal = "Normal", heroic = "Heroic", mythic = "Mythic" }
+-- pretty text for an instance difficulty label
+ANx.DIFF_LABEL_TEXT = {
+    [""] = "", N = "Normal", H = "Heroic", M = "Mythic",
+    ["10"] = "10 Player", ["25"] = "25 Player",
+    ["10N"] = "10 Normal", ["25N"] = "25 Normal",
+    ["10H"] = "10 Heroic", ["25H"] = "25 Heroic",
+}
 ANx.RAID_SIZE_LABELS = { all = "All", ["10"] = "10-man", ["25"] = "25-man" }
 
 -- Does an instance-difficulty label pass the difficulty tier + raid-size filters?
@@ -107,6 +114,8 @@ local defaults = {
     forge = 1,            -- Forge Level (1 Attunable, 2 TF, 3 WF, 4 LF)
     classicSkin = false,  -- true = "unskinned" look (no painted art pack)
     browseWinPos = nil,   -- saved position of the simple browse window
+    timeMode = "off",     -- how run length weighs in: off/builtin/personal/both
+    challengeTimes = {},  -- ["map:diff"] = Dungeon Challenge target, in seconds
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
@@ -422,6 +431,25 @@ function ANx.InvalidateProfOfItem() profOfItem = nil end
 function ANx.ArtOn()
     if ANx.db and ANx.db.classicSkin then return false end
     return ANx.Art ~= nil
+end
+
+-- How clear times factor into the recommendations.
+--   off      - ignore run length entirely (default)
+--   builtin  - the shipped per-instance estimates only
+--   personal - only times this account has actually recorded
+--   both     - estimates, with your own times overriding them once you have one
+ANx.TIME_MODES = { "off", "builtin", "personal", "both" }
+ANx.TIME_MODE_LABELS = {
+    off = "Off (ignore run length)",
+    builtin = "Built-in estimates",
+    personal = "Personal times only",
+    both = "Built-in + personal",
+}
+function ANx.TimeMode()
+    local m = ANx.db and ANx.db.timeMode
+    if m == true then return "both" end          -- migrate an old boolean
+    if ANx.TIME_MODE_LABELS[m] then return m end
+    return "off"
 end
 
 function ANx.RunMode()
@@ -863,6 +891,7 @@ eventFrame:RegisterEvent("START_LOOT_ROLL")
 eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
+eventFrame:RegisterEvent("UNIT_AURA")
 eventFrame:RegisterEvent("PLAYER_MONEY")
 eventFrame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
 
@@ -970,6 +999,9 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         if ANx.CheckLootRoll then ANx.CheckLootRoll(arg1) end
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
         if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
+        if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras) end
+    elseif event == "UNIT_AURA" then
+        if arg1 == "player" and ANx.ScanSpeedAuras then ANx.ScanSpeedAuras() end
     elseif event == "PLAYER_LOGOUT" then
         if ANx.Engine then pcall(ANx.Engine.ExportCache) end
         pcall(ANx.ExportStatusCache)
@@ -1034,78 +1066,20 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UI and ANx.UI.ToggleUnskinned then ANx.UI.ToggleUnskinned() end
     elseif msg == "browse" then
         if ANx.WinBrowse then ANx.WinBrowse.Toggle() end
-    elseif msg == "frames" then
-        -- geometry dump for UI debugging: where each header piece REALLY is
-        local function N(v) return v and math.floor(v + 0.5) or "?" end
-        local function R(region)
-            if not region then return "nil" end
-            local gl = region.GetLeft and region:GetLeft()
-            local gt = region.GetTop and region:GetTop()
-            local gr = region.GetRight and region:GetRight()
-            local gb = region.GetBottom and region:GetBottom()
-            local w = region.GetWidth and region:GetWidth()
-            local h = region.GetHeight and region:GetHeight()
-            local shown = ""
-            if region.IsShown then shown = region:IsShown() and " shown" or " HIDDEN" end
-            return string.format("L=%s T=%s R=%s B=%s W=%s H=%s%s",
-                N(gl), N(gt), N(gr), N(gb), N(w), N(h), shown)
+    elseif msg:match("^timemode") then
+        local arg = msg:match("^timemode%s+(%S+)")
+        if arg and ANx.TIME_MODE_LABELS[arg] then
+            ANx.db.timeMode = arg
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+            if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
         end
-        for _, n in ipairs({ "AttuneNextFrame", "AttuneNextForgeBtn",
-            "AttuneNextFindBtn", "AttuneNextGoBtn", "AttuneNextNavhome",
-            "AttuneNextRescanBtn" }) do
-            local b = _G[n]
-            if b then
-                ANx.Print(n .. ": " .. R(b))
-                if b.anxPlate then ANx.Print("   plate: " .. R(b.anxPlate)) end
-                if b.anxHover then ANx.Print("   hover: " .. R(b.anxHover)) end
-                if b.anxChipIcon then ANx.Print("   icon:  " .. R(b.anxChipIcon)) end
-                if b.anxIcon then ANx.Print("   icon:  " .. R(b.anxIcon)) end
-                if b.anxLabel then ANx.Print("   label: " .. R(b.anxLabel)) end
-                if b.anxLogo then ANx.Print("   logo:  " .. R(b.anxLogo)) end
-                if b.anxActive then ANx.Print("   navchip: " .. R(b.anxActive)) end
-                local fs = b.GetFontString and b:GetFontString()
-                if fs then ANx.Print("   enginetext: " .. R(fs)) end
-                if b.GetNormalTexture then
-                    local nt = b:GetNormalTexture()
-                    if nt then ANx.Print("   normaltex: " .. R(nt)) end
-                end
-            end
-        end
-        local F = _G.AttuneNextFrame
-        if F and F.searchBg then ANx.Print("searchBg: " .. R(F.searchBg)) end
-        if F and F.logoTex then ANx.Print("logo: " .. R(F.logoTex)) end
-        -- every region living inside the forge chip, mine or not
-        local fb = _G.AttuneNextForgeBtn
-        if fb and fb.GetRegions then
-            local regs = { fb:GetRegions() }
-            ANx.Print("ForgeBtn regions: " .. #regs)
-            for i = 1, #regs do
-                local r = regs[i]
-                local kind = (r.GetObjectType and r:GetObjectType()) or "?"
-                local tex = (r.GetTexture and r:GetTexture()) or (r.GetText and r:GetText()) or ""
-                ANx.Print(string.format("  [%d]%s%s %s tex=%s", i, kind,
-                    r.anxMine and " (mine)" or " (FOREIGN)", R(r), tostring(tex)))
-            end
-        end
-        if fb and fb.GetChildren then
-            local kids = { fb:GetChildren() }
-            ANx.Print("ForgeBtn child frames: " .. #kids)
-            for i = 1, #kids do
-                local k = kids[i]
-                local nm = (k.GetName and k:GetName()) or "?"
-                local kind = (k.GetObjectType and k:GetObjectType()) or "?"
-                ANx.Print(string.format("  [%d]%s '%s' %s", i, kind, tostring(nm), R(k)))
-                if k.GetRegions then
-                    local kr = { k:GetRegions() }
-                    for j = 1, #kr do
-                        local r = kr[j]
-                        local tex = (r.GetTexture and r:GetTexture()) or ""
-                        ANx.Print(string.format("     .%d %s %s tex=%s",
-                            j, (r.GetObjectType and r:GetObjectType()) or "?", R(r), tostring(tex)))
-                    end
-                end
-            end
-        end
+        ANx.Print("Run-time weighting: |cffffff00" .. (ANx.TIME_MODE_LABELS[ANx.TimeMode()])
+            .. "|r  (off / builtin / personal / both)")
+    elseif msg == "times" or msg == "challenge" then
+        if ANx.PrintChallengeTimes then ANx.PrintChallengeTimes() end
+    elseif msg == "times reset" or msg == "challenge reset" then
+        if ANx.ResetChallengeTimes then ANx.ResetChallengeTimes() end
     elseif msg == "hud" then
         ANx.db.zoneHud = not ANx.db.zoneHud
         ANx.Print("instance HUD " .. (ANx.db.zoneHud and "on" or "off"))
@@ -1115,7 +1089,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

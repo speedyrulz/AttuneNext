@@ -187,6 +187,16 @@ function Engine.MaybeYield()
     yieldCheck = yieldCheck + 1
     if yieldCheck >= 25 then
         yieldCheck = 0
+        if coroutine.running() then coroutine.yield() end
+    end
+end
+
+-- Unconditional yield (safe on the main thread). Use this around chunks of
+-- work that are individually expensive - MaybeYield only stops every 25th
+-- call, which is far too coarse for "one whole instance" sized steps.
+function Engine.YieldNow()
+    if coroutine.running() then
+        yieldCheck = 0
         coroutine.yield()
     end
 end
@@ -1478,6 +1488,16 @@ end
 -- How long a run takes, as a multiple of an average run (1.0). Dungeons use
 -- one time for normal/heroic and a separate mythic time; raids are per size.
 function Engine.RunTime(map, diffLabel)
+    local mode = ANx.TimeMode and ANx.TimeMode() or "off"
+    if mode == "off" then return 1 end            -- run length ignored entirely
+    -- your own recorded time beats the built-in estimate
+    if mode ~= "builtin" then
+        local measured = ANx.MeasuredRunSeconds and ANx.MeasuredRunSeconds(map, diffLabel)
+        if measured and measured > 0 then
+            return measured / (ANx.BASE_RUN_SECONDS or 900)
+        end
+        if mode == "personal" then return 1 end   -- no personal time: stay neutral
+    end
     local t = ANx.InstanceTime and ANx.InstanceTime[map]
     if not t then return 1 end
     local lbl = diffLabel or ""
@@ -1522,13 +1542,14 @@ function Engine.RankInstanceRuns(view, yielding)
     for _, exp in ipairs(exps) do
         for _, kind in ipairs(kinds) do
             for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
-                if yielding then Engine.MaybeYield() end
                 for _, d in ipairs(Engine.InstanceDiffs(inst)) do
+                    if yielding then Engine.YieldNow() end
                     if ANx.DifficultyMatches(d.label) then
                         local instKey = inst.map .. ":" .. d.diff
                         if not ignoreInst[instKey] then
                             local expected, count = 0, 0
                             for _, id in ipairs(d.items) do
+                                if yielding then Engine.MaybeYield() end
                                 if Engine.Eligible(id) and not ANx.CountDone(id) then
                                     count = count + 1
                                     expected = expected
@@ -1574,11 +1595,12 @@ function Engine.RankZoneRuns(view, yielding)
     local ignoreInst = a.ignoreInst or {}
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
-        if yielding then Engine.MaybeYield() end
+        if yielding then Engine.YieldNow() end
         local key = "z:" .. z.zone
         if not ignoreInst[key] then
             local expected, count, items = 0, 0, {}
             for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
+                if yielding then Engine.MaybeYield() end
                 if Engine.Eligible(id) and not ANx.CountDone(id) then
                     local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())
                     if cc > 0 then
@@ -1641,6 +1663,22 @@ function Engine.RankRuns(view, mode, yielding)
     return runs
 end
 
+-- Are the background scans finished? Ranking before they are is wasted work:
+-- each summary that lands invalidates the result and we would start over.
+function Engine.SummariesReady()
+    for exp = 1, 3 do
+        local s = summaryCache[exp]
+        if not (s and s.ready) then return false end
+    end
+    -- structural scans still queued? (a queued ranking does not count - it is
+    -- the thing waiting on this)
+    for _, j in ipairs(Engine.scanJobs) do
+        local tag = j.tag or ''
+        if tag == '' or tag:sub(1, 7) == 'summary' then return false end
+    end
+    return true
+end
+
 -- Ready-made ranking if it is already cached, else nil (no work done).
 function Engine.RunsCached(view, mode)
     local c = runsCache[RunsKey(view, mode or "DR")]
@@ -1658,6 +1696,8 @@ function Engine.RankRunsAsync(view, mode, onDone)
         if onDone then onDone(ready) end
         return ready
     end
+    -- wait for the item scans: ranking now would be thrown away when they land
+    if not Engine.SummariesReady() then return nil end
     local key = RunsKey(view, mode)
     Engine.Enqueue(function()
         Engine.RankRuns(view, mode, true)
@@ -1678,8 +1718,18 @@ end
 
 function Engine.GoalName(goal)
     if goal.kind == "inst" then
-        local n = goal.name or ("Instance " .. tostring(goal.map))
-        if goal.diffText then n = n .. "  (" .. goal.diffText .. ")" end
+        -- goals tracked from the recommendation pane only carry map + diff, so
+        -- resolve the display name rather than trusting stored fields
+        local n = goal.name
+        if not n then
+            local inst = Engine.InstanceByMap and Engine.InstanceByMap(goal.map)
+            n = inst and inst.name or ("Instance " .. tostring(goal.map))
+        end
+        local d = goal.diffText
+        if (not d or d == "") and goal.diff and goal.diff ~= "" then
+            d = (ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[goal.diff]) or goal.diff
+        end
+        if d and d ~= "" then n = n .. "  (" .. d .. ")" end
         return n
     end
     return (ANx.EXP_SHORT[goal.exp] or "?") .. " "
