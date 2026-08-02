@@ -177,6 +177,11 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.4.1**
+- **Nameplate marking**: mobs that still drop something you have not attuned glow **green** on their nameplate (*drops N*), and vendors selling something unattuned glow **blue** (*sells N*). Mobs mark from the zone's loot data automatically; vendors mark when you point at them or open their shop. Options under Options > Nameplates: **Mark nameplates** (Off / On / Respect filters - only items passing the window's filter chips), **Attunes counted** (this character / whole account), and **Pulse the glow**. Vendors only glow if friendly nameplates are on (**Shift-V**) - the addon reminds you if they're off. `/an plates` cycles the mode, `/an plates report` and `/an plates why` diagnose.
+- Recommendation cards no longer suggest zones from the wrong expansion when browsing a category with run mode *All* or *Zones* (the button still considers everything, as intended).
+- The cards' **Current level filter** now filters the whole window: every list, count and card hides items whose required level you don't meet - vendor stock included - and it re-checks when you level up. The button's own level filter still only affects the button's picks.
+
 **v3.4.0**
 - **The AttuneNext button and the on-screen recommendation cards are now separate features with their own options.** Each has its own Focus, Drop rates, Current level filter and whole-run mode (Options screen has a section for each; `/an settings` carries the button's). The defining difference: the **cards are always context sensitive** - they follow the screen you are looking at - while the **button is always global**, recommending from everything you still need no matter where you are. The old "Context sensitive" toggle and "category overrides" rule are gone; the ignore list stays shared.
 - **New Current level filter** (off by default, per feature): recommendations only include content the current character's level supports - dungeons, raids and zones whose minimum recommended level is at or below your level, and vendor/crafted items whose required level you meet. Built-in level data covers all 74 instances and 72 zones.
@@ -189,7 +194,7 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 - Fixed goal names showing as *"Instance 603"* - they now resolve from the instance and difficulty, so two difficulties of the same raid are told apart.
 
 **v3.2.1**
-- **Performance**: the first click on a menu entry no longer hitches. Run rankings and the What'''s Left report are now built on the background pump (10ms per frame) and cached until something actually changes, instead of being recomputed inline on every render - screens paint immediately and fill in a moment later. Per-clear drop odds are memoized, and two callers waiting on the same background job both get their result.
+- **Performance**: the first click on a menu entry no longer hitches. Run rankings and the What's Left report are now built on the background pump (10ms per frame) and cached until something actually changes, instead of being recomputed inline on every render - screens paint immediately and fill in a moment later. Per-clear drop odds are memoized, and two callers waiting on the same background job both get their result.
 
 **v3.2.0**
 - Recommendations now factor in **how long a run takes** and **how many of each mob you actually kill**. Clear times for all 73 dungeons and raids (per difficulty - mythic and each raid size have their own) are built in, and static spawn counts for ~4,900 loot-bearing creatures turn a per-kill drop chance into a realistic per-clear chance: 2.5% off 40 trash spawns is now correctly rated above 20% off a single boss. Runs are ranked by **expected new attunes per unit of time**, so a 15-minute dungeon can beat a 2-hour raid, and every recommendation shows its run length (e.g. *0.3x avg run*). Goal clear estimates use the same math.
@@ -202,7 +207,7 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 **v3.1.0**
 - Added an **Unskinned layout** toggle (Options, the Interface panel, or `/an unskinned`): plain dark frames and standard Blizzard buttons instead of the painted art pack, for players who prefer the older look. The AttuneNext logo and sidebar emblem stay painted either way, and the switch applies instantly - no reload needed.
-- New **simple browse window** (`/an browse`, `/anbrowse`, or `/run AttuneNextBrowse()` in a macro): a plain standard-WoW window with just the wordmark, the browse menus and their filters - no sidebar, goals, favorites or recommendation button. It shares the main window'''s data and filter settings, so lists match exactly, and it'''s **resizable** - drag the bottom-right corner; a taller window simply shows more rows.
+- New **simple browse window** (`/an browse`, `/anbrowse`, or `/run AttuneNextBrowse()` in a macro): a plain standard-WoW window with just the wordmark, the browse menus and their filters - no sidebar, goals, favorites or recommendation button. It shares the main window's data and filter settings, so lists match exactly, and it's **resizable** - drag the bottom-right corner; a taller window simply shows more rows.
 
 **v3.0.0**
 

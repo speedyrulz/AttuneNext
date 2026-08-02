@@ -2883,6 +2883,8 @@ builders["options"] = function(view)
     builders["anextConfig"](view)
     AddRow({ text = "|cffffd100On-screen recommendations|r" })
     builders["recConfig"](view)
+    AddRow({ text = "|cffffd100Nameplates|r" })
+    builders["platesConfig"](view)
 end
 
 -- One options shape, two features: the button ("btn") and the cards ("rec").
@@ -2915,8 +2917,10 @@ local function ConfigRows(which)
         "Easiest (highest drop-rate) item first; Ignore steps to the next best.",
         "Off: every obtainable item is equally likely.")
     toggleRow("Current level filter", "level",
-        "Only dungeons/raids/zones your level supports, and only items you can equip (level "
-            .. ANx.CharLevel() .. ").",
+        isBtn and ("Only dungeons/raids/zones your level supports, and only items you can equip (level "
+            .. ANx.CharLevel() .. ").")
+        or ("The whole window: every list, count and card hides content above level "
+            .. ANx.CharLevel() .. "."),
         "Off: content of every level is considered.")
     do
         local cur = ANx.RunMode(which)
@@ -2974,6 +2978,47 @@ end
 
 builders["recConfig"] = function(view)
     ConfigRows("rec")
+end
+
+builders["platesConfig"] = function(view)
+    local p = ANx.db.plates
+    local MODE_LABEL = { off = "Off", on = "On", filters = "Respect filters" }
+    AddRow({
+        text = "Mark nameplates:  |cffffd100" .. (MODE_LABEL[p.mode] or "?") .. "|r",
+        sub = (p.mode == "off") and "Standard nameplates - nothing is marked."
+            or ((p.mode == "on")
+                and "Green glow: mobs dropping anything unattuned. Blue: vendors selling it."
+                or "Only items that pass the AttuneNext window's filters count."),
+        onClick = function()
+            p.mode = (p.mode == "off" and "on") or (p.mode == "on" and "filters") or "off"
+            if ANx.Plates then ANx.Plates.Invalidate() end
+            if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+            UI.Render()
+        end,
+    })
+    AddRow({
+        text = "Attunes counted:  |cffffd100"
+            .. (p.scope == "char" and "This character" or "Whole account") .. "|r",
+        sub = (p.scope == "char")
+            and "Marks what THIS character has not attuned yet (On mode)."
+            or "Marks what no character on the account has attuned (On mode).",
+        onClick = function()
+            p.scope = (p.scope == "char") and "acct" or "char"
+            if ANx.Plates then ANx.Plates.Invalidate() end
+            if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+            UI.Render()
+        end,
+    })
+    AddRow({
+        text = "Pulse the glow:  " .. (p.pulse and "|cff00ff00On|r" or "|cffaaaaaaOff|r"),
+        sub = p.pulse and "The mark breathes gently." or "The mark holds a steady glow.",
+        onClick = function()
+            p.pulse = not p.pulse
+            if ANx.Plates then ANx.Plates.RefreshAllPlates() end
+            if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+            UI.Render()
+        end,
+    })
 end
 
 builders["events"] = function(view)

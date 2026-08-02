@@ -424,6 +424,11 @@ function Engine.Eligible(itemId)
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
+    -- the on-screen Current level filter is a WINDOW filter: with it on, every
+    -- list, count and card hides items whose required level the character does
+    -- not meet (vendor stock included)
+    if ANx.LevelGate and ANx.LevelGate("rec")
+        and not Engine.ItemLevelOk(itemId, true) then return false end
     return true
 end
 
@@ -1391,9 +1396,20 @@ function Engine.ZoneMinLevel(z)
     return (ANx.ZoneLevels and z and ANx.ZoneLevels[z.zone]) or 1
 end
 
+-- nil = the client cannot say (item info unavailable). The level gate treats
+-- that as "does not pass": an item we cannot verify must not be recommended,
+-- or uncached high-level vendor stock slips straight through the filter.
 function Engine.ItemMinLevel(id)
-    local _, _, _, _, minLvl = (_G.GetItemInfoCustom or _G.GetItemInfo or function() end)(id)
+    local name, _, _, _, minLvl = (_G.GetItemInfoCustom or _G.GetItemInfo or function() end)(id)
+    if name == nil and minLvl == nil then return nil end
     return tonumber(minLvl) or 0
+end
+
+-- Does this item pass the current-level filter? (true when the gate is off)
+function Engine.ItemLevelOk(id, levelOn, charLvl)
+    if not levelOn then return true end
+    local ml = Engine.ItemMinLevel(id)
+    return ml ~= nil and ml <= (charLvl or ANx.CharLevel())
 end
 
 -- Pick the next item for the AttuneNext button, honoring its config.
@@ -1417,7 +1433,7 @@ function Engine.AttuneNextPick(view, opts)
     for _, id in ipairs(items) do
         if not seen[id] and not ignore[id] and Engine.Eligible(id)
             and not ANx.CountDone(id) and #Engine.Sources(id) > 0
-            and (not levelOn or Engine.ItemMinLevel(id) <= charLvl) then
+            and Engine.ItemLevelOk(id, levelOn, charLvl) then
             seen[id] = true
             pool[#pool + 1] = id
         end
@@ -1625,16 +1641,21 @@ function Engine.RankZoneRuns(view, yielding, which)
     local ignoreInst = (ANx.db and ANx.db.anext and ANx.db.anext.ignoreInst) or {}
     local levelOn = ANx.LevelGate(which)
     local charLvl = ANx.CharLevel()
+    -- the context-sensitive feature stays inside the expansion you are
+    -- browsing: a Classic screen must never recommend a TBC zone sweep
+    local scopeExp = (which == "rec") and view and view.exp or nil
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
         if yielding then Engine.YieldNow() end
         local key = "z:" .. z.zone
         if not ignoreInst[key]
+            and (not scopeExp or z.exp == scopeExp)
             and (not levelOn or Engine.ZoneMinLevel(z) <= charLvl) then
             local expected, count, items = 0, 0, {}
             for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
                 if yielding then Engine.MaybeYield() end
-                if Engine.Eligible(id) and not ANx.CountDone(id) then
+                if Engine.Eligible(id) and not ANx.CountDone(id)
+                    and Engine.ItemLevelOk(id, levelOn, charLvl) then
                     local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())
                     if cc > 0 then
                         count = count + 1

@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.4.0"
+ANx.VERSION = "3.4.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -130,6 +130,11 @@ local defaults = {
         instance = "off", --   whole-run mode: off/D/R/DR/Z/all
         ignore = {},      --   itemId -> true  (shared with the recommendation cards)
         ignoreInst = {},  --   "map:diff" / "z:zone" -> true (shared too)
+    },
+    plates = {            -- nameplate marking of mobs/vendors with unattuned items
+        mode = "on",      --   "off" / "on" (everything unattuned) / "filters" (window filters)
+        scope = "acct",   --   "char" or "acct": whose attunes count (On mode)
+        pulse = true,     --   breathe the glow
     },
     rec = {               -- the ON-SCREEN recommendation cards (always context sensitive)
         focus = false,
@@ -917,6 +922,7 @@ eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 eventFrame:RegisterEvent("PLAYER_LOGOUT")
 eventFrame:RegisterEvent("UNIT_AURA")
+eventFrame:RegisterEvent("PLAYER_LEVEL_UP")
 eventFrame:RegisterEvent("PLAYER_MONEY")
 eventFrame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
 
@@ -961,6 +967,7 @@ function AttuneNext_OnDataReady()
         end
         -- refresh in the background; toast when everything is live
         for exp = 1, 3 do ANx.Engine.GetSummary(exp) end
+        if ANx.Plates and ANx.Plates.OnDataReady then ANx.Plates.OnDataReady() end
         ANx.After(2, WatchRefreshDone)
     end
     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
@@ -984,6 +991,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             end
         end
         if ANx.InitSettings then ANx.InitSettings() end
+        if ANx.Plates and ANx.Plates.Init then ANx.Plates.Init() end
 
         -- instant data at login: restore last session's structure right away
         -- (validated again once the server data arrives) - item status comes
@@ -999,6 +1007,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             if typeId == 11 then -- ATTUNE_HAS
                 ANx.MarkAttuneDirty()
                 if ANx.OnAttuneCompleted then ANx.OnAttuneCompleted(id) end
+                if ANx.Plates then ANx.Plates.OnAttune() end
                 if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(false) end
                 if ANx.GoalHudUpdate then ANx.GoalHudUpdate() end
             end
@@ -1033,8 +1042,14 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
         if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
         if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras) end
+        if ANx.Plates then ANx.Plates.OnZone() end
     elseif event == "UNIT_AURA" then
         if arg1 == "player" and ANx.ScanSpeedAuras then ANx.ScanSpeedAuras() end
+    elseif event == "PLAYER_LEVEL_UP" then
+        -- the level filters compare against the character's level
+        if ANx.Engine then ANx.Engine.InvalidateStats() end
+        if ANx.Plates then ANx.Plates.Invalidate() end
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     elseif event == "PLAYER_LOGOUT" then
         if ANx.Engine then pcall(ANx.Engine.ExportCache) end
         pcall(ANx.ExportStatusCache)
@@ -1212,6 +1227,17 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
                 ANx.Print("Tip: switch the menu to the dungeon-challenge list, then |cffffff00/an ldb dump|r.")
             end)
         end
+    elseif msg == "plates" then
+        local m = ANx.db.plates.mode
+        ANx.db.plates.mode = (m == "off" and "on") or (m == "on" and "filters") or "off"
+        ANx.Print("Nameplates: |cffffff00" .. ({ off = "Off", on = "On (everything unattuned)",
+            filters = "Respect window filters" })[ANx.db.plates.mode] .. "|r")
+        if ANx.Plates then ANx.Plates.Invalidate() end
+        if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+    elseif msg == "plates report" then
+        if ANx.Plates then ANx.Plates.Report() end
+    elseif msg == "plates why" then
+        if ANx.Plates then ANx.Plates.Why() end
     elseif msg == "times" or msg == "challenge" then
         if ANx.PrintChallengeTimes then ANx.PrintChallengeTimes() end
     elseif msg == "times reset" or msg == "challenge reset" then
@@ -1225,7 +1251,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an ldb, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end
