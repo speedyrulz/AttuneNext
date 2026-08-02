@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.3.0"
+ANx.VERSION = "3.4.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -116,19 +116,26 @@ local defaults = {
     browseWinPos = nil,   -- saved position of the simple browse window
     timeMode = "off",     -- how run length weighs in: off/builtin/personal/both
     challengeTimes = {},  -- ["map:diff"] = Dungeon Challenge target, in seconds
+    speedPct = {},        -- ["map:diff"] = earned Speed Buff, percent
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
     accessories = true,   -- show accessory-slot items (cloak/ring/neck/trinket)
     difficulty = "all",   -- dungeon/raid difficulty tier: "all"/"normal"/"heroic"/"mythic"
     raidSize = "all",     -- raid size: "all"/"10"/"25"
-    anext = {             -- the AttuneNext (smart random) button config
-        context = false,  --   pick only from the screen you're on
+    anext = {             -- the AttuneNext BUTTON config (never context sensitive)
         focus = false,    --   focus the zone/instance/craft/currency with the most left
         dropRate = false, --   factor in drop rates (excludes vendor/quest/crafted items)
-        instance = "off", --  recommend a whole run: off/D/R/DR/Z/all (old true = "DR")
-        ignore = {},      --   [itemId] = true : items to skip
-        ignoreInst = {},  --   [instKey] = true : instance runs to skip
+        level = false,    --   only content the current character's level supports
+        instance = "off", --   whole-run mode: off/D/R/DR/Z/all
+        ignore = {},      --   itemId -> true  (shared with the recommendation cards)
+        ignoreInst = {},  --   "map:diff" / "z:zone" -> true (shared too)
+    },
+    rec = {               -- the ON-SCREEN recommendation cards (always context sensitive)
+        focus = false,
+        dropRate = false,
+        level = false,
+        instance = "off",
     },
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
     reagents = {},        -- [craftedItemId] = { reagentId1, count1, ... } from profession-window scans (account-wide)
@@ -452,12 +459,30 @@ function ANx.TimeMode()
     return "off"
 end
 
-function ANx.RunMode()
-    local m = ANx.db and ANx.db.anext and ANx.db.anext.instance
+-- The two recommendation features share one options shape but separate values:
+--   "btn" = the AttuneNext button (global - never context sensitive)
+--   "rec" = the on-screen recommendation cards (always context sensitive)
+function ANx.Cfg(which)
+    local db = ANx.db or {}
+    if which == "rec" then return db.rec or {} end
+    return db.anext or {}
+end
+
+function ANx.RunMode(which)
+    local m = ANx.Cfg(which).instance
     if m == true then return "DR" end
     if not m or m == false or m == "off" then return "off" end
     if ANx.RUN_MODE_LABELS[m] then return m end
     return "off"
+end
+
+function ANx.CharLevel()
+    return (_G.UnitLevel and _G.UnitLevel("player")) or 80
+end
+
+-- Is the current-character-level filter on for this feature?
+function ANx.LevelGate(which)
+    return ANx.Cfg(which).level == true
 end
 
 function ANx.ForgeLevel()
@@ -950,6 +975,14 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         _G.AttuneNextDB = _G.AttuneNextDB or {}
         ApplyDefaults(_G.AttuneNextDB, defaults)
         ANx.db = _G.AttuneNextDB
+        -- one-time: the recommendation cards used to share the button's config
+        if not ANx.db.recSeeded then
+            ANx.db.recSeeded = true
+            local a, r = ANx.db.anext or {}, ANx.db.rec
+            if r then
+                r.focus, r.dropRate, r.instance = a.focus, a.dropRate, a.instance
+            end
+        end
         if ANx.InitSettings then ANx.InitSettings() end
 
         -- instant data at login: restore last session's structure right away
@@ -1076,6 +1109,109 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         end
         ANx.Print("Run-time weighting: |cffffff00" .. (ANx.TIME_MODE_LABELS[ANx.TimeMode()])
             .. "|r  (off / builtin / personal / both)")
+    elseif msg == "ldb" or msg:match("^ldb ") then
+        -- Diagnostic: the leaderboard menu shows dungeon-challenge times
+        -- (including the 30/40/50% thresholds) for every instance. Nothing in
+        -- the documented API exposes them, so look at what the menu itself
+        -- populates: new globals, and the text of its frames.
+        --   /an ldb        open + update the menu, then dump
+        --   /an ldb dump   dump what is on screen right now
+        --   /an ldb globals  list global names mentioning leaderboard/challenge
+        local sub = msg:match("^ldb%s+(%S+)")
+
+        local function DumpFrameText()
+            if not _G.EnumerateFrames then
+                ANx.Print("EnumerateFrames unavailable.")
+                return
+            end
+            local shown, lines = 0, 0
+            local f = _G.EnumerateFrames()
+            while f and lines < 120 do
+                local ok, name = pcall(function() return f.GetName and f:GetName() end)
+                local vis = false
+                pcall(function() vis = f.IsVisible and f:IsVisible() end)
+                if ok and name and vis and name:lower():find("leader") then
+                    shown = shown + 1
+                    ANx.Print("|cffffd100frame|r " .. name)
+                    local function Walk(fr, depth)
+                        if depth > 3 or lines >= 120 then return end
+                        local regs = {}
+                        pcall(function() regs = { fr:GetRegions() } end)
+                        for _, r in ipairs(regs) do
+                            local txt
+                            pcall(function()
+                                if r.GetText then txt = r:GetText() end
+                            end)
+                            if txt and txt ~= "" then
+                                lines = lines + 1
+                                ANx.Print("   " .. string.rep(" ", depth) .. txt)
+                                if lines >= 120 then return end
+                            end
+                        end
+                        local kids = {}
+                        pcall(function() kids = { fr:GetChildren() } end)
+                        for _, k in ipairs(kids) do Walk(k, depth + 1) end
+                    end
+                    Walk(f, 0)
+                end
+                f = _G.EnumerateFrames(f)
+            end
+            if shown == 0 then
+                ANx.Print("No visible frame named *leader* - open the Leaderboards menu, pick the dungeon challenge tab, then run |cffffff00/an ldb dump|r.")
+            end
+        end
+
+        local function DumpGlobals(before)
+            local n = 0
+            for name, v in pairs(_G) do
+                if type(name) == "string" then
+                    local low = name:lower()
+                    local interesting = low:find("leader") or low:find("challenge")
+                        or low:find("ldb") or low:find("speedrun")
+                    if interesting and (not before or not before[name]) then
+                        n = n + 1
+                        if n <= 40 then
+                            local extra = ""
+                            if type(v) == "table" then
+                                local cnt = 0
+                                for _ in pairs(v) do cnt = cnt + 1 end
+                                extra = " (" .. cnt .. " entries)"
+                            end
+                            ANx.Print("  |cff33ff99" .. name .. "|r " .. type(v) .. extra)
+                        end
+                    end
+                end
+            end
+            if n == 0 then ANx.Print("  (nothing found)") end
+        end
+
+        if sub == "globals" then
+            ANx.Print("Globals mentioning leaderboard / challenge:")
+            DumpGlobals(nil)
+        elseif sub == "dump" then
+            ANx.Print("Leaderboard frame text:")
+            DumpFrameText()
+        else
+            local before = {}
+            for k in pairs(_G) do before[k] = true end
+            local opened = false
+            for _, fn in ipairs({ "OpenLeaderboards", "UpdateLeaderboards" }) do
+                if type(_G[fn]) == "function" then
+                    opened = true
+                    pcall(_G[fn])
+                end
+            end
+            ANx.Print(opened and "Opened the leaderboard menu; dumping in a moment..."
+                or "OpenLeaderboards() not found on this client.")
+            ANx.After(1, function()
+                ANx.Print("New globals after opening:")
+                DumpGlobals(before)
+                ANx.Print("Existing leaderboard globals:")
+                DumpGlobals(nil)
+                DumpFrameText()
+                ANx.Print("Tip: switch the menu to the dungeon-challenge list, then |cffffff00/an ldb dump|r.")
+            end)
+        end
     elseif msg == "times" or msg == "challenge" then
         if ANx.PrintChallengeTimes then ANx.PrintChallengeTimes() end
     elseif msg == "times reset" or msg == "challenge reset" then
@@ -1089,7 +1225,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an ldb, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

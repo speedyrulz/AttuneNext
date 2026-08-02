@@ -177,10 +177,14 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.4.0**
+- **The AttuneNext button and the on-screen recommendation cards are now separate features with their own options.** Each has its own Focus, Drop rates, Current level filter and whole-run mode (Options screen has a section for each; `/an settings` carries the button's). The defining difference: the **cards are always context sensitive** - they follow the screen you are looking at - while the **button is always global**, recommending from everything you still need no matter where you are. The old "Context sensitive" toggle and "category overrides" rule are gone; the ignore list stays shared.
+- **New Current level filter** (off by default, per feature): recommendations only include content the current character's level supports - dungeons, raids and zones whose minimum recommended level is at or below your level, and vendor/crafted items whose required level you meet. Built-in level data covers all 74 instances and 72 zones.
+
 **v3.3.0**
 - **Run length can now weigh in on recommendations**, off by default. The **Run length** setting (Options, the Interface panel, or `/an timemode`) offers **Off** (ignore how long a run takes), **Built-in estimates** (shipped clear times for all 73 dungeons and raids, per difficulty), **Personal times only** (just the instances you have a Dungeon Challenge time for - anything else stays neutral), and **Built-in + personal** (estimates, replaced by challenge times where known). Times are measured against a **1.00x = 15:00** baseline, so a 7:30 clear reads as 0.50x.
-- **Personal times come from Synastria's Dungeon Challenge buff**, read off your auras when you enter an instance - the addon never times you and records nothing itself. Each difficulty is tracked separately and the times are account-wide. `/an times` lists them, `/an times reset` clears them.
-- Recommendations show the run length they used - *"0.3x avg run"*, or *"challenge 8:30"* where a challenge time is known.
+- **Personal times are derived from your Speed Buff.** The speed you have earned in an instance is a direct function of how fast your account cleared it - Synastria's thresholds are linear with 70% as the ceiling - so an earned buff of P% implies a clear in `estimate x (1 - P/70)`. The buff is read off your auras when you enter, which also works when the challenge itself fails because you out-level it; the Dungeon Challenge target is a fallback where no buff is known yet. Nothing is timed or recorded by the addon. Each difficulty is tracked separately, times are account-wide, and `/an times` lists them (`/an times reset` clears them).
+- Recommendations show the run length they used - *"0.3x avg run"*, or *"~4:30 at 50% speed"* once your speed buff there is known.
 - **Performance**: opening a screen no longer hitches. Run rankings and the What's Left report are built on a background pump (10ms per frame) and cached until something actually changes, and ranking waits for the item scans to finish rather than being redone every time one lands.
 - Fixed goal names showing as *"Instance 603"* - they now resolve from the instance and difficulty, so two difficulties of the same raid are told apart.
 

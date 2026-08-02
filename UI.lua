@@ -1331,7 +1331,7 @@ local function CreateMainFrame()
         local rec = Card(hp, "AttuneNextHomeRec")
         SizeCard(rec, FRAME_W - 32, 124)
         rec:SetPoint("TOPLEFT", hp, "TOPLEFT", 0, 0)
-        rec:SetScript("OnClick", function() UI.AttuneNextGo() end)
+        rec:SetScript("OnClick", function() UI.ShowRec() end)
         local recHdrIc = rec:CreateTexture(nil, "OVERLAY")
         recHdrIc.anxMine = true
         recHdrIc:SetPoint("TOPLEFT", rec, "TOPLEFT", CARD_PAD, -14)
@@ -1366,7 +1366,7 @@ local function CreateMainFrame()
         sbl:SetPoint("CENTER", showBtn, "CENTER", 0, 0)
         sbl:SetText("|cffffd100Show Me|r")
         showBtn.anxLabel = sbl
-        showBtn:SetScript("OnClick", function() UI.AttuneNextGo() end)
+        showBtn:SetScript("OnClick", function() UI.ShowRec() end)
         hp.rec = rec
 
         -- three expansion cards
@@ -1665,7 +1665,7 @@ local function CreateMainFrame()
         rc.line2 = UI.CardFS(rc, "GameFontHighlightSmall", 30, -124)
         rc.line2:SetWidth(SIDE_W - 60)
         rc.goBtn = UI.CardButton(rc, "AttuneNextSideGo", SIDE_W - 60, "Show Me")
-        rc.goBtn:SetScript("OnClick", function() UI.AttuneNextGo() end)
+        rc.goBtn:SetScript("OnClick", function() UI.ShowRec() end)
         rc.trackBtn = UI.CardButton(rc, "AttuneNextSideTrack", SIDE_W - 60, "Track as a goal")
         sp.rec = rc
 
@@ -2832,10 +2832,10 @@ builders["options"] = function(view)
             sub = (mode == "off")
                 and "Recommendations ignore how long a run takes."
                 or ((mode == "personal")
-                    and "Only instances you have seen a Dungeon Challenge time for are weighted."
+                    and "Only instances your speed buff (or a challenge time) tells us about."
                     or ((mode == "builtin")
                         and "Uses the built-in clear-time estimates for every instance."
-                        or "Built-in estimates, replaced by Dungeon Challenge times where known.")),
+                        or "Built-in estimates, scaled by the speed buff you have earned there.")),
             onClick = function()
                 local cur = ANx.TimeMode()
                 for i, m in ipairs(ANx.TIME_MODES) do
@@ -2881,10 +2881,14 @@ builders["options"] = function(view)
     })
     AddRow({ text = "|cffffd100The AttuneNext button|r" })
     builders["anextConfig"](view)
+    AddRow({ text = "|cffffd100On-screen recommendations|r" })
+    builders["recConfig"](view)
 end
 
-builders["anextConfig"] = function(view)
-    local a = ANx.db.anext
+-- One options shape, two features: the button ("btn") and the cards ("rec").
+local function ConfigRows(which)
+    local a = ANx.Cfg(which)
+    local isBtn = (which == "btn")
     local function toggleRow(label, key, subOn, subOff)
         local on = a[key] == true
         AddRow({
@@ -2892,67 +2896,84 @@ builders["anextConfig"] = function(view)
             sub = on and subOn or subOff,
             onClick = function()
                 a[key] = not on
+                Engine.InvalidateStats()
                 if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
                 UI.Render()
             end,
         })
     end
-    toggleRow("Context sensitive", "context",
-        "Picks only from the screen you launched it from.",
-        "Off (default): picks from everything you still need.")
+    AddRow({
+        text = isBtn and "|cff888888Global:|r picks from everything, wherever you are."
+            or "|cff888888Context sensitive:|r follows the screen you are looking at.",
+        sub = isBtn and "The button never narrows to the current screen - the cards do that."
+            or "The Recommended card always draws from the category you have open.",
+    })
     toggleRow("Focus the place with the most left", "focus",
         "Aims at the zone / instance / profession / currency with the most items left.",
         "Off: doesn't prioritise any one place.")
     toggleRow("Factor in drop rates", "dropRate",
         "Easiest (highest drop-rate) item first; Ignore steps to the next best.",
         "Off: every obtainable item is equally likely.")
+    toggleRow("Current level filter", "level",
+        "Only dungeons/raids/zones your level supports, and only items you can equip (level "
+            .. ANx.CharLevel() .. ").",
+        "Off: content of every level is considered.")
     do
-        local cur = ANx.RunMode()
+        local cur = ANx.RunMode(which)
         AddRow({
             text = "Recommend a whole dungeon/raid/zone:  |cffffd100"
                 .. (ANx.RUN_MODE_LABELS[cur] or "?") .. "|r",
-            sub = (cur == "off") and "Off: the AttuneNext button recommends a single item."
+            sub = (cur == "off") and ((isBtn and "Off: the AttuneNext button recommends a single item."
+                    or "Off: the card recommends a single item."))
                 or ((cur == "Z") and "Points you at the best ZONE to sweep (quests + world drops), with expected new attunes."
                 or "Points you at the best run for this mode, with expected new attunes per clear."),
             onClick = function()
                 local modes = ANx.RUN_MODES
-                local c = ANx.RunMode()
+                local c = ANx.RunMode(which)
                 for i, m in ipairs(modes) do
                     if m == c then a.instance = modes[(i % #modes) + 1]; break end
                 end
+                Engine.InvalidateStats()
                 if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
                 UI.Render()
             end,
         })
     end
-    AddRow({
-        text = "|cff33ff99The category you're browsing wins|r",
-        sub = "A category screen always wins over the options above.",
-    })
-    local n = 0
-    for _ in pairs(a.ignore or {}) do n = n + 1 end
-    for _ in pairs(a.ignoreInst or {}) do n = n + 1 end
-    if n > 0 then
+    if isBtn then
+        local n = 0
+        for _ in pairs(ANx.db.anext.ignore or {}) do n = n + 1 end
+        for _ in pairs(ANx.db.anext.ignoreInst or {}) do n = n + 1 end
+        if n > 0 then
+            AddRow({
+                text = "|cffff6060Reset the ignore list|r  (" .. n .. ")",
+                sub = "Clears every skipped item and instance (shared with the cards).",
+                onClick = function()
+                    ANx.db.anext.ignore = {}
+                    ANx.db.anext.ignoreInst = {}
+                    Engine.InvalidateStats()
+                    ANx.Print("AttuneNext ignore list cleared.")
+                    UI.Render()
+                end,
+            })
+        else
+            AddRow({
+                text = "|cff777777Reset the ignore list  (empty)|r",
+                sub = "Nothing skipped right now.",
+            })
+        end
         AddRow({
-            text = "|cffff6060Reset the ignore list|r  (" .. n .. ")",
-            sub = "Clears every skipped item and instance.",
-            onClick = function()
-                ANx.db.anext.ignore = {}
-                ANx.db.anext.ignoreInst = {}
-                ANx.Print("AttuneNext ignore list cleared.")
-                UI.Render()
-            end,
-        })
-    else
-        AddRow({
-            text = "|cff777777Reset the ignore list  (empty)|r",
-            sub = "Nothing skipped right now.",
+            text = "|cff888888How it works|r",
+            sub = "Use Ignore on a result to skip it and get the next pick.",
         })
     end
-    AddRow({
-        text = "|cff888888How it works|r",
-        sub = "Use Ignore on a result to skip it and get the next pick.",
-    })
+end
+
+builders["anextConfig"] = function(view)
+    ConfigRows("btn")
+end
+
+builders["recConfig"] = function(view)
+    ConfigRows("rec")
 end
 
 builders["events"] = function(view)
@@ -2990,7 +3011,7 @@ builders["items"] = function(view)
                 view.zoneRun and "zone" or "run", view.runExpected or 0,
                 view.zoneRun and "" or " per clear",
                 view.runTime and (", " .. string.format("%.2gx avg run", view.runTime)) or ""),
-            onClick = function() UI.AttuneNextIgnoreInstance(view.instKey, view.launchedFrom) end,
+            onClick = function() UI.AttuneNextIgnoreInstance(view.instKey, view.launchedFrom, view.recCfg) end,
         })
     end
     if view.worldDrop and ANx.db.raresOnly then
@@ -3928,6 +3949,10 @@ function UI.TimeTag(r)
     local lbl = r.d and r.d.label
     local measured = map and ANx.MeasuredRunSeconds and ANx.MeasuredRunSeconds(map, lbl)
     if measured then
+        local pct = ANx.SpeedPct and ANx.SpeedPct(map, lbl)
+        if pct then
+            return string.format("~%s at %d%% speed", ANx.FormatRunTime(measured), pct)
+        end
         return string.format("challenge %s", ANx.FormatRunTime(measured))
     end
     return string.format("%.2gx avg run", t)
@@ -3974,17 +3999,17 @@ function UI.UpdateHomePanel()
     local rec, view = hp.rec, UI.Current()
 
     -- recommendation preview (never navigates - Show Me / clicking does)
-    local mode = ANx.RunMode()
+    local mode = ANx.RunMode("rec")
     local have = false
     if mode ~= "off" then
         -- cached ranking if we have one, otherwise rank in the background and
         -- refresh when it lands (opening a screen must never hitch)
-        local runs = Engine.RunsCached(view, mode)
+        local runs = Engine.RunsCached(view, mode, "rec")
         if not runs then
             -- ranking before the scans finish would be redone every time a
             -- summary lands, which is what made login sluggish
             if Engine.SummariesReady() then
-                Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+                Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end, "rec")
             end
             runs = {}
         end
@@ -4011,7 +4036,7 @@ function UI.UpdateHomePanel()
             rec.icon:Show()
         end
     else
-        local id = Engine.AttuneNextPick(view)
+        local id = Engine.AttuneNextPick(view, { cfg = "rec" })
         if id then
             have = true
             local name, _, quality, tex = ANx.GetItemDisplay(id)
@@ -4034,7 +4059,7 @@ function UI.UpdateHomePanel()
     if not have then
         rec.icon:Hide()
         rec.anxIconKey = nil
-        if mode ~= "off" and not Engine.RunsCached(view, mode) then
+        if mode ~= "off" and not Engine.RunsCached(view, mode, "rec") then
             rec.title:SetText(Engine.SummariesReady()
                 and "|cff888888Finding the best run...|r"
                 or "|cff888888Scanning the item database...|r")
@@ -4568,12 +4593,12 @@ function UI.UpdateSidePane()
 
     -- ---------- context recommendation for THIS screen ----------
     local rc = sp.rec
-    local mode = ANx.RunMode()
+    local mode = ANx.RunMode("rec")
     local runs
     if mode ~= "off" then
-        runs = Engine.RunsCached(view, mode)
+        runs = Engine.RunsCached(view, mode, "rec")
         if not runs and Engine.SummariesReady() then
-            Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end)
+            Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end, "rec")
         end
     end
     local pending = (mode ~= "off") and not runs
@@ -4604,8 +4629,7 @@ function UI.UpdateSidePane()
         rc.line1:SetText("")
         rc.line2:SetText("")
     else
-        local pick = Engine.AttuneNextPick(view, { forceContext = true })
-            or Engine.AttuneNextPick(view)
+        local pick = Engine.AttuneNextPick(view, { cfg = "rec" })
         if pick then
             local name, _, quality, tex = ANx.GetItemDisplay(pick)
             if ANx.ClearArtCoords then ANx.ClearArtCoords(rc.icon) end
@@ -4675,14 +4699,13 @@ local function IsNonInstanceCategory(from)
     return false
 end
 
--- Shared item pick: when the launch category isn't dungeon/raid but whole-instance
--- mode is on, scope the pick to that category (the category overrides the option).
+-- The button's pick is global: it never narrows to the current screen (the
+-- on-screen recommendation cards are the context-sensitive feature).
 local function PickFrom(from)
-    local force = (ANx.RunMode() ~= "off") and IsNonInstanceCategory(from)
-    return Engine.AttuneNextPick(from, { forceContext = force })
+    return Engine.AttuneNextPick(nil, { cfg = "btn" })
 end
 
-local function PushRun(r, from)
+local function PushRun(r, from, which)
     if r.zone then
         ANx.Print(string.format("Best zone: |cffffff00%s|r  -  ~%.1f expected new attunes (%d left)",
             r.zone.name, r.expected, r.count))
@@ -4690,7 +4713,7 @@ local function PushRun(r, from)
             zoneName = r.zone.name, worldDrop = true,
             fromAttuneNextRun = true, zoneRun = true,
             runExpected = r.expected, runCount = r.count, runTime = r.time,
-            instKey = r.instKey, launchedFrom = from })
+            instKey = r.instKey, launchedFrom = from, recCfg = which })
     else
         local lbl = RunLabel(r.d)
         ANx.Print(string.format("Best run: |cffffff00%s%s|r  -  ~%.1f expected new attunes (%d left, %s)",
@@ -4698,14 +4721,43 @@ local function PushRun(r, from)
         UI.Push({ type = "items", title = r.inst.name .. lbl, items = r.d.items,
             zoneName = r.inst.name, srcFilter = ANx.INSTANCE_DROP_SRC,
             fromAttuneNextRun = true, runExpected = r.expected, runCount = r.count,
-            runTime = r.time, instKey = r.instKey, launchedFrom = from,
+            runTime = r.time, instKey = r.instKey, launchedFrom = from, recCfg = which,
             instMap = r.inst.map, instName = r.inst.name, instDiff = r.d.label })
+    end
+end
+
+-- "Show Me" on a recommendation card: opens what the card is showing, using
+-- the cards' own (context sensitive) config.
+function UI.ShowRec()
+    EnsureEngine()
+    local from = UI.Current()
+    if from and (from.type == "sources" or from.type == "items") and from.launchedFrom then
+        from = from.launchedFrom
+    end
+    for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
+    local mode = ANx.RunMode("rec")
+    if mode ~= "off" then
+        local runs = Engine.RunsCached(from, mode, "rec")
+            or Engine.RankRuns(from, mode, nil, "rec")
+        if runs and #runs > 0 then
+            PushRun(runs[1], from, "rec")
+            return
+        end
+    end
+    local id = Engine.AttuneNextPick(from, { cfg = "rec" })
+    if id then
+        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true,
+                  launchedFrom = from, recCfg = "rec" })
+    elseif Engine.scanning then
+        ANx.Print("Still building the item database - try again in a moment.")
+    else
+        ANx.Print("Nothing to recommend here with the current filters/options.")
     end
 end
 
 function UI.AttuneNextGo()
     EnsureEngine()
-    -- context-sensitive uses the screen you launched from, so remember it
+    -- the button is global: the current screen is only remembered for Back
     local from = UI.Current()
     if from and (from.type == "sources" or from.type == "items") and from.launchedFrom then
         from = from.launchedFrom
@@ -4713,12 +4765,12 @@ function UI.AttuneNextGo()
     -- make sure the summaries are being built so wide contexts have data
     for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
 
-    -- Whole-run mode, unless the category you're browsing overrides it.
-    local runMode = ANx.RunMode()
-    if runMode ~= "off" and not IsNonInstanceCategory(from) then
-        local runs = Engine.RankRuns(from, runMode)
+    -- Whole-run mode (global: the button doesn't follow the current screen).
+    local runMode = ANx.RunMode("btn")
+    if runMode ~= "off" then
+        local runs = Engine.RankRuns(nil, runMode, nil, "btn")
         if #runs > 0 then
-            PushRun(runs[1], from)
+            PushRun(runs[1], from, "btn")
         elseif Engine.scanning then
             ANx.Print("Still building the item database - try AttuneNext again in a moment.")
         else
@@ -4738,13 +4790,16 @@ function UI.AttuneNextGo()
 end
 
 -- Ignore an instance run and show the next best one.
-function UI.AttuneNextIgnoreInstance(instKey, from)
+function UI.AttuneNextIgnoreInstance(instKey, from, which)
+    which = which or "btn"
     ANx.db.anext.ignoreInst = ANx.db.anext.ignoreInst or {}
     ANx.db.anext.ignoreInst[instKey] = true
+    Engine.InvalidateStats()
     UI.Pop()
-    local runs = Engine.RankRuns(from or UI.Current(), ANx.RunMode())
+    local view = (which == "rec") and (from or UI.Current()) or nil
+    local runs = Engine.RankRuns(view, ANx.RunMode(which), nil, which)
     if #runs > 0 then
-        PushRun(runs[1], from)
+        PushRun(runs[1], from, which)
     else
         ANx.Print("No more runs to recommend.")
     end
@@ -4759,10 +4814,17 @@ function UI.AttuneNextIgnore(itemId)
     -- pop the current sources view, then re-pick from where we launched
     local cur = UI.Current()
     local from = (cur and cur.launchedFrom) or nil
+    local which = (cur and cur.recCfg) or "btn"
     UI.Pop()
-    local id = PickFrom(from or UI.Current())
+    local id
+    if which == "rec" then
+        id = Engine.AttuneNextPick(from or UI.Current(), { cfg = "rec" })
+    else
+        id = PickFrom()
+    end
     if id then
-        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
+        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true,
+                  launchedFrom = from, recCfg = which })
     else
         ANx.Print("Nothing left to recommend with the current filters/options.")
     end

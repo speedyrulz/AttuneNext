@@ -109,9 +109,12 @@ local function BuildPanel()
     anHdr:SetText("The AttuneNext button")
 
     local RX, RY = 330, -140
-    controls.ctx = MakeCheck("Ctx", "Context sensitive (current screen)", RX, RY,
-        function() return ANx.db.anext.context end,
-        function(v) ANx.db.anext.context = v end)
+    controls.level = MakeCheck("Level", "Current level filter (my level and below)", RX, RY,
+        function() return ANx.db.anext.level end,
+        function(v)
+            ANx.db.anext.level = v
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+        end)
     controls.focus = MakeCheck("Focus", "Focus the place with the most left", RX, RY + STEP,
         function() return ANx.db.anext.focus end,
         function(v) ANx.db.anext.focus = v end)
@@ -145,6 +148,12 @@ local function BuildPanel()
         if ANx.Engine then ANx.Engine.InvalidateStats() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end)
+
+    local recNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    recNote:SetPoint("TOPLEFT", RX + 4, RY + STEP * 6 - 2)
+    recNote:SetWidth(280)
+    recNote:SetJustifyH("LEFT")
+    recNote:SetText("|cff888888On-screen recommendation cards have their own options (always context sensitive): AttuneNext > Options.|r")
 
     local anNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     anNote:SetPoint("TOPLEFT", RX + 4, RY + STEP * 5 - 8)

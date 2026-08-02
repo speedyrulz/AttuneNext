@@ -1380,23 +1380,44 @@ function Engine.ItemBucket(itemId)
     return "#" .. (srcName or "Unknown")
 end
 
+-- ---------------------------------------------------------------------
+-- Current-character-level gates (used by both recommendation features)
+-- ---------------------------------------------------------------------
+function Engine.InstanceMinLevel(inst)
+    return (ANx.InstanceLevels and inst and ANx.InstanceLevels[inst.map]) or 1
+end
+
+function Engine.ZoneMinLevel(z)
+    return (ANx.ZoneLevels and z and ANx.ZoneLevels[z.zone]) or 1
+end
+
+function Engine.ItemMinLevel(id)
+    local _, _, _, _, minLvl = (_G.GetItemInfoCustom or _G.GetItemInfo or function() end)(id)
+    return tonumber(minLvl) or 0
+end
+
 -- Pick the next item for the AttuneNext button, honoring its config.
 -- Returns itemId (or nil) and the size of the pool it chose from.
 -- opts.forceContext: draw from the launch screen's category even if the global
 -- "Context sensitive" toggle is off (used when the selected category overrides a
 -- conflicting option like whole-instance mode).
 function Engine.AttuneNextPick(view, opts)
-    local a = (ANx.db and ANx.db.anext) or {}
-    local ignore = a.ignore or {}
-    local useContext = a.context or (opts and opts.forceContext)
+    local which = (opts and opts.cfg) or "btn"
+    local a = ANx.Cfg(which)
+    local ignore = (ANx.db and ANx.db.anext and ANx.db.anext.ignore) or {}
+    -- the cards are context sensitive by nature; the button never is
+    local useContext = (which == "rec") or (opts and opts.forceContext)
     local items = useContext and Engine.ContextItems(view) or Engine.Universe()
+    local levelOn = ANx.LevelGate(which)
+    local charLvl = ANx.CharLevel()
 
-    -- base pool: eligible, unattuned, obtainable, not ignored
+    -- base pool: eligible, unattuned, obtainable, not ignored, level-appropriate
     local pool = {}
     local seen = {}
     for _, id in ipairs(items) do
         if not seen[id] and not ignore[id] and Engine.Eligible(id)
-            and not ANx.CountDone(id) and #Engine.Sources(id) > 0 then
+            and not ANx.CountDone(id) and #Engine.Sources(id) > 0
+            and (not levelOn or Engine.ItemMinLevel(id) <= charLvl) then
             seen[id] = true
             pool[#pool + 1] = id
         end
@@ -1487,17 +1508,8 @@ end
 
 -- How long a run takes, as a multiple of an average run (1.0). Dungeons use
 -- one time for normal/heroic and a separate mythic time; raids are per size.
-function Engine.RunTime(map, diffLabel)
-    local mode = ANx.TimeMode and ANx.TimeMode() or "off"
-    if mode == "off" then return 1 end            -- run length ignored entirely
-    -- your own recorded time beats the built-in estimate
-    if mode ~= "builtin" then
-        local measured = ANx.MeasuredRunSeconds and ANx.MeasuredRunSeconds(map, diffLabel)
-        if measured and measured > 0 then
-            return measured / (ANx.BASE_RUN_SECONDS or 900)
-        end
-        if mode == "personal" then return 1 end   -- no personal time: stay neutral
-    end
+-- The shipped estimate for a run, as a multiple of an average run.
+function Engine.BuiltinRunTime(map, diffLabel)
     local t = ANx.InstanceTime and ANx.InstanceTime[map]
     if not t then return 1 end
     local lbl = diffLabel or ""
@@ -1514,13 +1526,26 @@ function Engine.RunTime(map, diffLabel)
     return t["*"] or t["10"] or t["25"] or 1
 end
 
+function Engine.RunTime(map, diffLabel)
+    local mode = ANx.TimeMode and ANx.TimeMode() or "off"
+    if mode == "off" then return 1 end            -- run length ignored entirely
+    -- what this account actually clears it in beats the estimate
+    if mode ~= "builtin" then
+        local measured = ANx.MeasuredRunSeconds and ANx.MeasuredRunSeconds(map, diffLabel)
+        if measured and measured > 0 then
+            return measured / (ANx.BASE_RUN_SECONDS or 900)
+        end
+        if mode == "personal" then return 1 end   -- nothing personal: stay neutral
+    end
+    return Engine.BuiltinRunTime(map, diffLabel)
+end
+
 -- ---------------------------------------------------------------------
 -- Instance-run recommendations (expected new attunes per run)
 -- ---------------------------------------------------------------------
 -- Which (expansion, kind) pairs to consider, given the view and Context option.
-local function InstanceScope(view)
-    local a = ANx.db and ANx.db.anext or {}
-    if a.context and view then
+local function InstanceScope(view, which)
+    if which == "rec" and view then
         local t = view.type
         if t == "instances" then return { view.exp }, { view.kind } end
         if t == "content" then return { view.exp }, { "D", "R" } end
@@ -1534,14 +1559,19 @@ end
 -- Ranked list of instance runs (each = a specific instance + difficulty),
 -- best first by expected new attunes per clear. Honors all filters + difficulty
 -- + Context + the ignored-instance list.
-function Engine.RankInstanceRuns(view, yielding)
-    local a = ANx.db and ANx.db.anext or {}
-    local ignoreInst = a.ignoreInst or {}
-    local exps, kinds = InstanceScope(view)
+function Engine.RankInstanceRuns(view, yielding, which)
+    local ignoreInst = (ANx.db and ANx.db.anext and ANx.db.anext.ignoreInst) or {}
+    local exps, kinds = InstanceScope(view, which)
+    local levelOn = ANx.LevelGate(which)
+    local charLvl = ANx.CharLevel()
     local runs = {}
     for _, exp in ipairs(exps) do
         for _, kind in ipairs(kinds) do
             for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
+                if levelOn and Engine.InstanceMinLevel(inst) > charLvl then
+                    inst = nil     -- above the character: skip this instance
+                end
+                if inst then
                 for _, d in ipairs(Engine.InstanceDiffs(inst)) do
                     if yielding then Engine.YieldNow() end
                     if ANx.DifficultyMatches(d.label) then
@@ -1567,6 +1597,7 @@ function Engine.RankInstanceRuns(view, yielding)
                         end
                     end
                 end
+                end
             end
         end
     end
@@ -1590,14 +1621,16 @@ local function ZoneRunSrc()
     return zoneRunSrc
 end
 
-function Engine.RankZoneRuns(view, yielding)
-    local a = ANx.db and ANx.db.anext or {}
-    local ignoreInst = a.ignoreInst or {}
+function Engine.RankZoneRuns(view, yielding, which)
+    local ignoreInst = (ANx.db and ANx.db.anext and ANx.db.anext.ignoreInst) or {}
+    local levelOn = ANx.LevelGate(which)
+    local charLvl = ANx.CharLevel()
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
         if yielding then Engine.YieldNow() end
         local key = "z:" .. z.zone
-        if not ignoreInst[key] then
+        if not ignoreInst[key]
+            and (not levelOn or Engine.ZoneMinLevel(z) <= charLvl) then
             local expected, count, items = 0, 0, {}
             for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
                 if yielding then Engine.MaybeYield() end
@@ -1629,29 +1662,29 @@ end
 -- Unified run ranking for the AttuneNext button, honoring the run mode:
 -- "D"/"R"/"DR" = instances of those kinds, "Z" = zones, "all" = everything.
 -- Context key: rankings differ per screen only when Context sensitive is on.
-local function RunsKey(view, mode)
-    local a = ANx.db and ANx.db.anext or {}
+local function RunsKey(view, mode, which)
     local ctx = ""
-    if a.context and view then
+    if which == "rec" and view then
         ctx = (view.type or "") .. ":" .. tostring(view.exp or "") .. ":" .. tostring(view.kind or view.content or "")
     end
-    return (mode or "DR") .. "|" .. ctx
+    local lvl = ANx.LevelGate(which) and ("L" .. ANx.CharLevel()) or ""
+    return (which or "btn") .. "|" .. (mode or "DR") .. "|" .. ctx .. "|" .. lvl
 end
 
-function Engine.RankRuns(view, mode, yielding)
+function Engine.RankRuns(view, mode, yielding, which)
     mode = mode or "DR"
-    local key = RunsKey(view, mode)
+    local key = RunsKey(view, mode, which)
     local c = runsCache[key]
     if c and c.rev == Engine.rev then return c.runs end
     local runs = {}
     if mode ~= "Z" then
         local only = (mode == "D" and "D") or (mode == "R" and "R") or nil
-        for _, r in ipairs(Engine.RankInstanceRuns(view, yielding)) do
+        for _, r in ipairs(Engine.RankInstanceRuns(view, yielding, which)) do
             if not only or r.kind == only then runs[#runs + 1] = r end
         end
     end
     if mode == "Z" or mode == "all" then
-        for _, r in ipairs(Engine.RankZoneRuns(view, yielding)) do runs[#runs + 1] = r end
+        for _, r in ipairs(Engine.RankZoneRuns(view, yielding, which)) do runs[#runs + 1] = r end
     end
     table.sort(runs, function(x, y)
         local sx, sy = x.score or x.expected, y.score or y.expected
@@ -1680,8 +1713,8 @@ function Engine.SummariesReady()
 end
 
 -- Ready-made ranking if it is already cached, else nil (no work done).
-function Engine.RunsCached(view, mode)
-    local c = runsCache[RunsKey(view, mode or "DR")]
+function Engine.RunsCached(view, mode, which)
+    local c = runsCache[RunsKey(view, mode or "DR", which)]
     if c and c.rev == Engine.rev then return c.runs end
     return nil
 end
@@ -1689,20 +1722,20 @@ end
 -- Rank in the background (10ms/frame budget) and call back when done. The UI
 -- uses this so opening a screen never blocks on a full pass over every
 -- instance, difficulty and item.
-function Engine.RankRunsAsync(view, mode, onDone)
+function Engine.RankRunsAsync(view, mode, onDone, which)
     mode = mode or "DR"
-    local ready = Engine.RunsCached(view, mode)
+    local ready = Engine.RunsCached(view, mode, which)
     if ready then
         if onDone then onDone(ready) end
         return ready
     end
     -- wait for the item scans: ranking now would be thrown away when they land
     if not Engine.SummariesReady() then return nil end
-    local key = RunsKey(view, mode)
+    local key = RunsKey(view, mode, which)
     Engine.Enqueue(function()
-        Engine.RankRuns(view, mode, true)
+        Engine.RankRuns(view, mode, true, which)
     end, function()
-        if onDone then onDone(Engine.RunsCached(view, mode) or {}) end
+        if onDone then onDone(Engine.RunsCached(view, mode, which) or {}) end
     end, "runs:" .. key)
     return nil
 end
