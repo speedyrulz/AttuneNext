@@ -177,6 +177,9 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.4.4**
+- The **Horde/Alliance filter now gates quests properly**: quest rows for the other faction are hidden (quests missing from the curated faction data derive their side from their race requirements), and items obtainable **only** from the other faction'''s quests are filtered out of every list, count and recommendation. Items that also drop or are sold somewhere are unaffected, and neutral quests always pass.
+
 **v3.4.3**
 - **The recommendation cards now derive WHAT to recommend from the screen itself** - their run-mode option is gone (the AttuneNext button keeps its own). Raid screens recommend the best raid run, dungeon screens the best dungeon, zone lists the best zone sweep, and vendors, quests, professions and item lists get a single item pick from what you are looking at; overview screens (Home, an expansion) recommend the best of everything, falling back to an item when nothing is runnable. Thanks to the user who suggested it.
 - **Fixed the multi-second freezes when clicking around the addon, and the memory errors.** Three causes: the recommendation cards were re-walking every attunable item **inline on every render** (the run *rankings* went to the background in 3.2.1, but the single-item pick never did); the structural cache was being re-serialized into SavedVariables after **every** filter click instead of only when a scan changed something; and cached run lists kept full per-screen copies forever. Picks are now computed on the background pump and cached per screen (cards show *Finding a pick...* for a moment), the AttuneNext button'''s pick is precomputed so pressing it is instant, exports only happen when the data really changed, and cached lists are capped. `/an perf` shows live memory and cache numbers.

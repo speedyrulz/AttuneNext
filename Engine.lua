@@ -24,6 +24,7 @@ local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
 local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
 local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
 local pickCache = {}       -- ["which|view"] -> { rev =, id = itemId or false }
+local questSideCache = {}  -- [itemId] = "A"/"H" (quest-only, one side) or false
 local cacheDirty = false   -- structural data changed since the last export
 
 -- Bumped whenever anything that affects counts changes (filters, attunes,
@@ -55,6 +56,7 @@ function Engine.InvalidateAll()
     clearChanceCache = {}
     runsCache = {}
     pickCache = {}
+    questSideCache = {}
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -432,8 +434,37 @@ end
 
 -- Shared item eligibility for counting/listing: character/account can attune it,
 -- faction filter passes, and (if the global toggle is on) it's zone-exclusive.
+-- For quest-only items: the one faction whose quests reward it, or nil if
+-- any of its quests are neutral / doable by both (or it has other sources).
+function Engine.ItemQuestSide(itemId)
+    local c = questSideCache[itemId]
+    if c ~= nil then return c or nil end
+    if not Engine.IsQuestOnly(itemId) then
+        questSideCache[itemId] = false
+        return nil
+    end
+    local side
+    for _, src in ipairs(Engine.Sources(itemId)) do
+        if src.srcType == ANx.SRC.QUEST then
+            local qs = ANx.QuestFactionSide(src.objId)
+            if not qs then questSideCache[itemId] = false return nil end
+            if side and side ~= qs then questSideCache[itemId] = false return nil end
+            side = qs
+        end
+    end
+    questSideCache[itemId] = side or false
+    return side
+end
+
 function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
+    -- an item ONLY obtainable from the other faction's quests is as
+    -- faction-locked as any Alliance-only drop, even without an item flag
+    local fac = ANx.db and ANx.db.faction
+    if fac and fac ~= "both" then
+        local qs = Engine.ItemQuestSide(itemId)
+        if qs and qs ~= fac then return false end
+    end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end

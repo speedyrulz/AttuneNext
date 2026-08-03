@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.4.3"
+ANx.VERSION = "3.4.4"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -701,12 +701,35 @@ function ANx.FactionAllowed(itemId)
     return itf == fac
 end
 
+-- Which side can do this quest? "A"/"H", or nil for both/unknown. The
+-- curated QuestFaction seed answers first; quests it misses are derived
+-- from their DBC race mask (Data_QuestReq) - a quest only Horde races can
+-- take IS a Horde quest.
+local Q_ALLIANCE_MASK = 1 + 4 + 8 + 64 + 1024      -- Human/Dwarf/NElf/Gnome/Draenei
+local Q_HORDE_MASK    = 2 + 16 + 32 + 128 + 512    -- Orc/Undead/Tauren/Troll/Belf
+
+function ANx.QuestFactionSide(questId)
+    if not questId then return nil end
+    local f = ANx.QuestFaction and ANx.QuestFaction[questId]
+    if f then return f end
+    local r = ANx.QuestRaces and ANx.QuestRaces[questId]
+    if not r then return nil end
+    local a = bit.band(r, Q_ALLIANCE_MASK) ~= 0
+    local h = bit.band(r, Q_HORDE_MASK) ~= 0
+    if a and not h then return "A" end
+    if h and not a then return "H" end
+    return nil
+end
+
 -- Node-level faction gate for quests / vendors. kind = "quest" | "vendor".
 function ANx.NodeFactionAllowed(kind, id)
     local fac = ANx.db and ANx.db.faction
     if not fac or fac == "both" or not id then return true end
-    local map = (kind == "quest") and ANx.QuestFaction or ANx.VendorFaction
-    local nf = map and map[id]
+    if kind == "quest" then
+        local side = ANx.QuestFactionSide(id)
+        return not side or side == fac
+    end
+    local nf = ANx.VendorFaction and ANx.VendorFaction[id]
     if not nf then return true end
     return nf == fac
 end
