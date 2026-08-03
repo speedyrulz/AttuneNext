@@ -177,9 +177,15 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.4.3**
+- **The recommendation cards now derive WHAT to recommend from the screen itself** - their run-mode option is gone (the AttuneNext button keeps its own). Raid screens recommend the best raid run, dungeon screens the best dungeon, zone lists the best zone sweep, and vendors, quests, professions and item lists get a single item pick from what you are looking at; overview screens (Home, an expansion) recommend the best of everything, falling back to an item when nothing is runnable. Thanks to the user who suggested it.
+- **Fixed the multi-second freezes when clicking around the addon, and the memory errors.** Three causes: the recommendation cards were re-walking every attunable item **inline on every render** (the run *rankings* went to the background in 3.2.1, but the single-item pick never did); the structural cache was being re-serialized into SavedVariables after **every** filter click instead of only when a scan changed something; and cached run lists kept full per-screen copies forever. Picks are now computed on the background pump and cached per screen (cards show *Finding a pick...* for a moment), the AttuneNext button'''s pick is precomputed so pressing it is instant, exports only happen when the data really changed, and cached lists are capped. `/an perf` shows live memory and cache numbers.
+
+**v3.4.2**
+- Recommendation cards now respect both context dimensions with run mode *All* or *Zones*: no zones from the wrong expansion (Hellfire while in Classic), and no zone sweeps at all while browsing dungeons or raids (Silithus while in Classic raids) - the expansion overview screen still offers its zones. The button still considers everything, as intended.
+
 **v3.4.1**
 - **Nameplate marking**: mobs that still drop something you have not attuned glow **green** on their nameplate (*drops N*), and vendors selling something unattuned glow **blue** (*sells N*). Mobs mark from the zone's loot data automatically; vendors mark when you point at them or open their shop. Options under Options > Nameplates: **Mark nameplates** (Off / On / Respect filters - only items passing the window's filter chips), **Attunes counted** (this character / whole account), and **Pulse the glow**. Vendors only glow if friendly nameplates are on (**Shift-V**) - the addon reminds you if they're off. `/an plates` cycles the mode, `/an plates report` and `/an plates why` diagnose.
-- Recommendation cards no longer suggest zones from the wrong expansion when browsing a category with run mode *All* or *Zones* (the button still considers everything, as intended).
 - The cards' **Current level filter** now filters the whole window: every list, count and card hides items whose required level you don't meet - vendor stock included - and it re-checks when you level up. The button's own level filter still only affects the button's picks.
 
 **v3.4.0**

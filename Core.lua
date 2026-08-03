@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.4.1"
+ANx.VERSION = "3.4.3"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -136,11 +136,10 @@ local defaults = {
         scope = "acct",   --   "char" or "acct": whose attunes count (On mode)
         pulse = true,     --   breathe the glow
     },
-    rec = {               -- the ON-SCREEN recommendation cards (always context sensitive)
-        focus = false,
-        dropRate = false,
+    rec = {               -- the ON-SCREEN recommendation cards (always context
+        focus = false,    -- sensitive; WHAT they recommend follows the screen,
+        dropRate = false, -- so they carry no run-mode option)
         level = false,
-        instance = "off",
     },
     stock = {},           -- [itemId] = last-seen numAvailable from a live merchant scan
     reagents = {},        -- [craftedItemId] = { reagentId1, count1, ... } from profession-window scans (account-wide)
@@ -987,7 +986,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             ANx.db.recSeeded = true
             local a, r = ANx.db.anext or {}, ANx.db.rec
             if r then
-                r.focus, r.dropRate, r.instance = a.focus, a.dropRate, a.instance
+                r.focus, r.dropRate = a.focus, a.dropRate
             end
         end
         if ANx.InitSettings then ANx.InitSettings() end
@@ -1234,6 +1233,15 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
             filters = "Respect window filters" })[ANx.db.plates.mode] .. "|r")
         if ANx.Plates then ANx.Plates.Invalidate() end
         if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
+    elseif msg == "perf" then
+        local st = ANx.Engine and ANx.Engine.PerfStats and ANx.Engine.PerfStats()
+        if st then
+            ANx.Print(string.format("Lua memory: |cffffff00%d KB|r   background jobs: %d", st.lua_kb, st.jobs))
+            ANx.Print(string.format("caches: sources=%d  stats=%d  zones=%d  runs=%d  picks=%d  odds=%d",
+                st.srcCache, st.stats, st.zones, st.runsKeys, st.pickKeys, st.clearChance))
+            collectgarbage("collect")
+            ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
+        end
     elseif msg == "plates report" then
         if ANx.Plates then ANx.Plates.Report() end
     elseif msg == "plates why" then
@@ -1251,7 +1259,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an perf, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

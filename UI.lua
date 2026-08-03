@@ -2922,7 +2922,13 @@ local function ConfigRows(which)
         or ("The whole window: every list, count and card hides content above level "
             .. ANx.CharLevel() .. "."),
         "Off: content of every level is considered.")
-    do
+    if not isBtn then
+        AddRow({
+            text = "|cff888888What it recommends follows the screen|r",
+            sub = "Raid screens get raids, dungeon screens dungeons, zone lists zones; vendors, quests and item lists get a single item.",
+        })
+    end
+    if isBtn then
         local cur = ANx.RunMode(which)
         AddRow({
             text = "Recommend a whole dungeon/raid/zone:  |cffffd100"
@@ -4043,10 +4049,12 @@ function UI.UpdateHomePanel()
     if not hp then return end
     local rec, view = hp.rec, UI.Current()
 
-    -- recommendation preview (never navigates - Show Me / clicking does)
-    local mode = ANx.RunMode("rec")
+    -- recommendation preview (never navigates - Show Me / clicking does).
+    -- What it recommends follows the screen, not an option.
+    local mode = Engine.ContextRunMode(view)
+    local runsEmpty = false
     local have = false
-    if mode ~= "off" then
+    if mode ~= "item" then
         -- cached ranking if we have one, otherwise rank in the background and
         -- refresh when it lands (opening a screen must never hitch)
         local runs = Engine.RunsCached(view, mode, "rec")
@@ -4057,6 +4065,8 @@ function UI.UpdateHomePanel()
                 Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end, "rec")
             end
             runs = {}
+        elseif #runs == 0 then
+            runsEmpty = true      -- computed, nothing to run: offer an item
         end
         local r = runs[1]
         if r then
@@ -4080,8 +4090,12 @@ function UI.UpdateHomePanel()
             end
             rec.icon:Show()
         end
-    else
-        local id = Engine.AttuneNextPick(view, { cfg = "rec" })
+    end
+    if mode == "item" or runsEmpty then
+        local id = Engine.PickCached(view, "rec")
+        if id == nil then
+            Engine.PickAsync(view, "rec", function() UI.RefreshIfShown() end)
+        end
         if id then
             have = true
             local name, _, quality, tex = ANx.GetItemDisplay(id)
@@ -4104,9 +4118,11 @@ function UI.UpdateHomePanel()
     if not have then
         rec.icon:Hide()
         rec.anxIconKey = nil
-        if mode ~= "off" and not Engine.RunsCached(view, mode, "rec") then
+        if not Engine.SummariesReady()
+            or (mode ~= "item" and not Engine.RunsCached(view, mode, "rec"))
+            or Engine.PickCached(view, "rec") == nil then
             rec.title:SetText(Engine.SummariesReady()
-                and "|cff888888Finding the best run...|r"
+                and "|cff888888Finding the best pick...|r"
                 or "|cff888888Scanning the item database...|r")
             rec.line1:SetText("")
             rec.line2:SetText("")
@@ -4638,15 +4654,15 @@ function UI.UpdateSidePane()
 
     -- ---------- context recommendation for THIS screen ----------
     local rc = sp.rec
-    local mode = ANx.RunMode("rec")
+    local mode = Engine.ContextRunMode(view)
     local runs
-    if mode ~= "off" then
+    if mode ~= "item" then
         runs = Engine.RunsCached(view, mode, "rec")
         if not runs and Engine.SummariesReady() then
             Engine.RankRunsAsync(view, mode, function() UI.RefreshIfShown() end, "rec")
         end
     end
-    local pending = (mode ~= "off") and not runs
+    local pending = (mode ~= "item") and not runs
     local r = runs and runs[1]
     local trackGoal
     if r then
@@ -4674,8 +4690,14 @@ function UI.UpdateSidePane()
         rc.line1:SetText("")
         rc.line2:SetText("")
     else
-        local pick = Engine.AttuneNextPick(view, { cfg = "rec" })
-        if pick then
+        local pick = Engine.PickCached(view, "rec")
+        if pick == nil then
+            Engine.PickAsync(view, "rec", function() UI.RefreshIfShown() end)
+            rc.icon:Hide()
+            rc.name:SetText(Engine.SummariesReady()
+                and "|cff888888Finding a pick...|r" or "|cff888888Scanning...|r")
+            rc.line1:SetText(""); rc.line2:SetText("")
+        elseif pick then
             local name, _, quality, tex = ANx.GetItemDisplay(pick)
             if ANx.ClearArtCoords then ANx.ClearArtCoords(rc.icon) end
             rc.icon:SetTexture(tex)
@@ -4745,9 +4767,19 @@ local function IsNonInstanceCategory(from)
 end
 
 -- The button's pick is global: it never narrows to the current screen (the
--- on-screen recommendation cards are the context-sensitive feature).
+-- on-screen recommendation cards are the context-sensitive feature). It is
+-- precomputed on the background pump, so this is normally a cache hit; a
+-- miss queues the work rather than freezing the click.
 local function PickFrom(from)
-    return Engine.AttuneNextPick(nil, { cfg = "btn" })
+    local id = Engine.PickCached(nil, "btn")
+    if id ~= nil then return id or nil end
+    Engine.PickAsync(nil, "btn", function(got)
+        if got then
+            UI.Push({ type = "sources", itemId = got, fromAttuneNext = true,
+                      launchedFrom = UI.Current(), recCfg = "btn" })
+        end
+    end)
+    return nil, "pending"
 end
 
 local function PushRun(r, from, which)
@@ -4780,21 +4812,38 @@ function UI.ShowRec()
         from = from.launchedFrom
     end
     for exp = 1, 3 do Engine.GetSummary(exp, UI.RefreshIfShown) end
-    local mode = ANx.RunMode("rec")
-    if mode ~= "off" then
+    local mode = Engine.ContextRunMode(from)
+    if mode ~= "item" then
         local runs = Engine.RunsCached(from, mode, "rec")
-            or Engine.RankRuns(from, mode, nil, "rec")
-        if runs and #runs > 0 then
+        if not runs then
+            Engine.RankRunsAsync(from, mode, function(got)
+                if got and #got > 0 then
+                    PushRun(got[1], from, "rec")
+                else
+                    ANx.Print("Nothing to recommend for this screen with the current filters.")
+                end
+            end, "rec")
+            ANx.Print("Finding a recommendation - one moment...")
+            return
+        end
+        if #runs > 0 then
             PushRun(runs[1], from, "rec")
             return
         end
+        -- computed, nothing to run here: fall through to an item pick
     end
-    local id = Engine.AttuneNextPick(from, { cfg = "rec" })
-    if id then
+    local id = Engine.PickCached(from, "rec")
+    if id == nil then
+        Engine.PickAsync(from, "rec", function(got)
+            if got then
+                UI.Push({ type = "sources", itemId = got, fromAttuneNext = true,
+                          launchedFrom = from, recCfg = "rec" })
+            end
+        end)
+        ANx.Print("Finding a recommendation - one moment...")
+    elseif id then
         UI.Push({ type = "sources", itemId = id, fromAttuneNext = true,
                   launchedFrom = from, recCfg = "rec" })
-    elseif Engine.scanning then
-        ANx.Print("Still building the item database - try again in a moment.")
     else
         ANx.Print("Nothing to recommend here with the current filters/options.")
     end
@@ -4824,11 +4873,12 @@ function UI.AttuneNextGo()
         return
     end
 
-    local id = PickFrom(from)
+    local id, pending = PickFrom(from)
     if id then
-        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true, launchedFrom = from })
-    elseif Engine.scanning then
-        ANx.Print("Still building the item database - try AttuneNext again in a moment.")
+        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true,
+                  launchedFrom = from, recCfg = "btn" })
+    elseif pending or Engine.scanning then
+        ANx.Print("Finding your next attunement - one moment...")
     else
         ANx.Print("Nothing to recommend here with the current filters/options.")
     end
@@ -4842,12 +4892,15 @@ function UI.AttuneNextIgnoreInstance(instKey, from, which)
     Engine.InvalidateStats()
     UI.Pop()
     local view = (which == "rec") and (from or UI.Current()) or nil
-    local runs = Engine.RankRuns(view, ANx.RunMode(which), nil, which)
-    if #runs > 0 then
-        PushRun(runs[1], from, which)
-    else
-        ANx.Print("No more runs to recommend.")
-    end
+    local mode = (which == "rec") and Engine.ContextRunMode(view) or ANx.RunMode("btn")
+    if mode == "item" or mode == "off" then mode = "all" end
+    Engine.RankRunsAsync(view, mode, function(got)
+        if got and #got > 0 then
+            PushRun(got[1], from, which)
+        else
+            ANx.Print("No more runs to recommend.")
+        end
+    end, which)
 end
 
 -- Ignore the current item and pick the next one.
@@ -4861,16 +4914,15 @@ function UI.AttuneNextIgnore(itemId)
     local from = (cur and cur.launchedFrom) or nil
     local which = (cur and cur.recCfg) or "btn"
     UI.Pop()
-    local id
-    if which == "rec" then
-        id = Engine.AttuneNextPick(from or UI.Current(), { cfg = "rec" })
-    else
-        id = PickFrom()
-    end
-    if id then
-        UI.Push({ type = "sources", itemId = id, fromAttuneNext = true,
-                  launchedFrom = from, recCfg = which })
-    else
-        ANx.Print("Nothing left to recommend with the current filters/options.")
-    end
+    -- the ignore list changed, so cached picks are stale
+    Engine.InvalidateStats()
+    local pview = (which == "rec") and (from or UI.Current()) or nil
+    Engine.PickAsync(pview, which, function(got)
+        if got then
+            UI.Push({ type = "sources", itemId = got, fromAttuneNext = true,
+                      launchedFrom = from, recCfg = which })
+        else
+            ANx.Print("Nothing left to recommend with the current filters/options.")
+        end
+    end)
 end

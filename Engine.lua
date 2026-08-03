@@ -23,6 +23,8 @@ local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V
 local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
 local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
 local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
+local pickCache = {}       -- ["which|view"] -> { rev =, id = itemId or false }
+local cacheDirty = false   -- structural data changed since the last export
 
 -- Bumped whenever anything that affects counts changes (filters, attunes,
 -- scans). Caches key off it instead of being cleared everywhere by hand.
@@ -38,6 +40,7 @@ function Engine.InvalidateStats()
     remainingCache = nil
     clearChanceCache = {}
     runsCache = {}
+    pickCache = {}
     BumpRev()
 end
 
@@ -51,6 +54,7 @@ function Engine.InvalidateAll()
     remainingCache = nil
     clearChanceCache = {}
     runsCache = {}
+    pickCache = {}
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -221,8 +225,17 @@ pumpFrame:SetScript("OnUpdate", function()
         table.remove(Engine.scanJobs, 1)
         if #Engine.scanJobs == 0 then
             Engine.scanning = false
-            -- all scans done: persist the structural cache for next session
-            pcall(Engine.ExportCache)
+            -- persist the structural cache ONLY when a scan actually changed
+            -- it - re-serializing thousands of ids after every filter click
+            -- was a serious source of GC hitches and SavedVariables bloat
+            if cacheDirty then
+                cacheDirty = false
+                pcall(Engine.ExportCache)
+            end
+            -- keep the button's global pick warm so pressing it is instant
+            if Engine.PickCached(nil, "btn") == nil then
+                Engine.PickAsync(nil, "btn")
+            end
         end
         if job.onDone then pcall(job.onDone) end
         for _, cb in ipairs(job.extra or {}) do pcall(cb) end
@@ -1204,10 +1217,30 @@ local function BuildSummary(exp)
         Engine.MaybeYield()
     end
     sum.ready = true
+    cacheDirty = true
     summaryCache[exp] = sum
 end
 
 -- Returns summary sets or nil if still scanning (auto-enqueues the scan)
+-- Rough cache/memory accounting for /an perf
+function Engine.PerfStats()
+    local function count(t)
+        local n = 0
+        for _ in pairs(t or {}) do n = n + 1 end
+        return n
+    end
+    return {
+        lua_kb = math.floor(collectgarbage("count")),
+        srcCache = count(srcCache),
+        runsKeys = count(runsCache),
+        pickKeys = count(pickCache),
+        clearChance = count(clearChanceCache),
+        stats = count(statsCache),
+        zones = count(zoneCache),
+        jobs = #Engine.scanJobs,
+    }
+end
+
 function Engine.GetSummary(exp, onDone)
     local s = summaryCache[exp]
     if s and s.ready then return s end
@@ -1428,9 +1461,11 @@ function Engine.AttuneNextPick(view, opts)
     local charLvl = ANx.CharLevel()
 
     -- base pool: eligible, unattuned, obtainable, not ignored, level-appropriate
+    local yielding = opts and opts.yielding
     local pool = {}
     local seen = {}
     for _, id in ipairs(items) do
+        if yielding then Engine.MaybeYield() end
         if not seen[id] and not ignore[id] and Engine.Eligible(id)
             and not ANx.CountDone(id) and #Engine.Sources(id) > 0
             and Engine.ItemLevelOk(id, levelOn, charLvl) then
@@ -1481,6 +1516,70 @@ end
 -- back-compat name
 function Engine.RandomUnattuned(view)
     return Engine.AttuneNextPick(view)
+end
+
+-- ---------------------------------------------------------------------
+-- What should the CONTEXT-SENSITIVE cards recommend on this screen?
+-- The cards have no run-mode option: the screen decides. Returns a run mode
+-- ("D"/"R"/"Z"/"all") or "item" for screens whose natural recommendation is
+-- a single item (vendors, quests, professions, specific item lists...).
+-- ---------------------------------------------------------------------
+function Engine.ContextRunMode(view)
+    if not view then return "all" end
+    local t = view.type
+    if t == "instances" then
+        return (view.kind == "R") and "R" or "D"
+    end
+    if t == "contentExp" then
+        if view.content == "D" then return "D" end
+        if view.content == "R" then return "R" end
+        if view.content == "W" or view.content == "Q" then return "Z" end
+        return "item"                       -- vendors/professions categories
+    end
+    if t == "zones" then return "Z" end     -- a list of zones
+    if t == "content" or t == "home" or t == "root" or t == "browse"
+        or t == "contentTypes" then
+        return "all"                        -- broad overviews: best of anything
+    end
+    -- drilled all the way down (an instance's or zone's item list, a vendor,
+    -- a quest, a profession, search results...): recommend an item from HERE
+    return "item"
+end
+
+-- ---------------------------------------------------------------------
+-- Cached / background picks
+-- ---------------------------------------------------------------------
+-- The pick walks every item in its scope, so it must NEVER run inline on a
+-- render: results are cached per screen (and per revision) and computed on
+-- the background pump. false = computed, nothing to recommend.
+local function PickKey(view, which)
+    return (which or "btn") .. "|" .. (view and tostring(view) or "global")
+end
+
+function Engine.PickCached(view, which)
+    local c = pickCache[PickKey(view, which)]
+    if c and c.rev == Engine.rev then return c.id end
+    return nil
+end
+
+function Engine.PickAsync(view, which, onDone)
+    local key = PickKey(view, which)
+    local c = pickCache[key]
+    if c and c.rev == Engine.rev then
+        if onDone then onDone(c.id) end
+        return c.id
+    end
+    if not Engine.SummariesReady() then return nil end
+    Engine.Enqueue(function()
+        local id = Engine.AttuneNextPick(view, { cfg = which, yielding = true })
+        pickCache[key] = { rev = Engine.rev, id = id or false }
+    end, function()
+        if onDone then
+            local e = pickCache[key]
+            onDone(e and e.rev == Engine.rev and e.id or nil)
+        end
+    end, "pick:" .. key)
+    return nil
 end
 
 -- ---------------------------------------------------------------------
@@ -1641,9 +1740,19 @@ function Engine.RankZoneRuns(view, yielding, which)
     local ignoreInst = (ANx.db and ANx.db.anext and ANx.db.anext.ignoreInst) or {}
     local levelOn = ANx.LevelGate(which)
     local charLvl = ANx.CharLevel()
-    -- the context-sensitive feature stays inside the expansion you are
-    -- browsing: a Classic screen must never recommend a TBC zone sweep
+    -- The context-sensitive feature respects BOTH context dimensions:
+    --   * expansion: a Classic screen never recommends a TBC zone sweep
+    --   * content:   a dungeons/raids screen never recommends a zone sweep
+    --     at all (the instance side already pins itself the same way)
     local scopeExp = (which == "rec") and view and view.exp or nil
+    if which == "rec" and view then
+        local t = view.type
+        if t == "instances"
+            or (t == "contentExp" and (view.content == "D" or view.content == "R"))
+            or (t == "items" and view.instMap) then
+            return {}                 -- instance context: zones are out of scope
+        end
+    end
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
         if yielding then Engine.YieldNow() end
@@ -1713,6 +1822,9 @@ function Engine.RankRuns(view, mode, yielding, which)
         if x.expected ~= y.expected then return x.expected > y.expected end
         return x.count > y.count
     end)
+    -- only the head of the list is ever consumed (best run + ignore
+    -- stepping); keeping hundreds of tails per screen just burns memory
+    for i = #runs, 26, -1 do runs[i] = nil end
     runsCache[key] = { rev = Engine.rev, runs = runs }
     return runs
 end
