@@ -999,6 +999,13 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
+    f.questClassBtn = Chip("AttuneNextQuestClassBtn", "quests", "My quests",
+        "Hide quests this character's class/race can never take.", function()
+        ANx.db.questClass = (ANx.db.questClass == "all") and "mine" or "all"
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+
     -- balanced chip grid that fills the content width: rows split evenly
     -- (6 -> 3+3, 9 -> 5+4), every chip one uniform width (sized so the
     -- fullest row spans logo-edge to rescan-edge), and rows with fewer
@@ -1869,7 +1876,7 @@ end
 
 -- ---- favorites -------------------------------------------------------
 local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "bindFilter",
-    "accessories", "difficulty", "raidSize", "raresOnly", "vendorFilter",
+    "accessories", "difficulty", "raidSize", "raresOnly", "vendorFilter", "questClass",
     "stockFilter", "affordableOnly" }
 
 local function FilterSnapshot(viewType)
@@ -2020,7 +2027,7 @@ function UI.RestoreFavorite(fav)
             if inst then
                 for _, dd in ipairs(Engine.InstanceDiffs(inst) or {}) do
                     local ok = (d.instDiff and dd.label == d.instDiff)
-                        or (not d.instDiff and ANx.DifficultyMatches(dd.label))
+                        or (not d.instDiff and ANx.DifficultyMatches(dd.label, d.instMap))
                     if ok then
                         for _, id in ipairs(dd.items) do
                             if not seen[id] then seen[id] = true; items[#items + 1] = id end
@@ -2470,7 +2477,7 @@ builders["instances"] = function(view)
         -- apply the difficulty / raid-size filter to the shown difficulty rows
         local diffs = {}
         for _, d in ipairs(Engine.InstanceDiffs(inst)) do
-            if ANx.DifficultyMatches(d.label) then diffs[#diffs + 1] = d end
+            if ANx.DifficultyMatches(d.label, inst.map) then diffs[#diffs + 1] = d end
         end
         if #diffs == 0 then
             -- nothing matches the difficulty filter for this instance; skip it
@@ -2633,7 +2640,7 @@ builders["quests"] = function(view)
     local zc = Engine.ZoneData(z)
     local shown = 0
     for _, q in ipairs(zc.questList) do
-      if ANx.QuestNodeAllowed(q.id) then
+      if ANx.QuestNodeAllowed(q.id) and ANx.QuestForClassAllowed(q.id) then
         local st = Engine.Stats(q.items, "q:" .. z.zone .. ":" .. q.id)
         local left = st.total - st.attuned
         if st.total > 0 and (left > 0 or ANx.ShowAttunedItems()) then
@@ -2656,7 +2663,8 @@ builders["quests"] = function(view)
             AddNodeRow(q.name, st, {
                 text = prefix .. q.name .. (hasArrow and "  |cff33ff99>|r" or ""),
                 sub = #q.items .. " attunable reward(s)"
-                    .. (hasArrow and ("  |cff888888- " .. hint .. "|r") or ""),
+                    .. (hasArrow and ("  |cff888888- " .. hint .. "|r") or "")
+                    .. (ANx.debug and ("  |cff5599ff(quest " .. q.id .. ")|r") or ""),
                 right = ANx.StatsString(st.attuned, st.total),
                 onClick = function()
                     ANx.SetQuestWaypoint(q.id, q.name)
@@ -2825,6 +2833,10 @@ builders["options"] = function(view)
     optToggle("Goal window", "On-screen progress bars for your goals (shows while you have goals).",
         function() return ANx.db.goalHud end,
         function(v) ANx.db.goalHud = v; if ANx.GoalHudNow then ANx.GoalHudNow() end end)
+    optToggle("Match my instance difficulty",
+        "Inside a dungeon/raid, its list shows only the difficulty you're in (e.g. 10-man while in Ulduar-10). Turns off the moment you pick a Difficulty or Size filter.",
+        function() return ANx.db.matchInstance ~= false end,
+        function(v) ANx.db.matchInstance = v; if ANx.Engine then ANx.Engine.InvalidateStats() end end)
     do
         local mode = ANx.TimeMode()
         AddRow({
@@ -2874,6 +2886,7 @@ builders["options"] = function(view)
             ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 1
             ANx.db.zoneExclusive = false; ANx.db.stockFilter = "all"
             ANx.db.vendorFilter = "all"; ANx.db.raresOnly = false; ANx.db.sort = {}
+            ANx.db.questClass = "mine"
             Engine.InvalidateStats()
             ANx.Print("Filters reset to defaults.")
             UI.Render()
@@ -3254,7 +3267,14 @@ builders["sources"] = function(view)
     local sources = Engine.Sources(itemId)
     local sorted = {}
     for _, s in ipairs(sources) do sorted[#sorted + 1] = s end
-    table.sort(sorted, function(a, b) return a.chance > b.chance end)
+    table.sort(sorted, function(a, b)
+        -- quests this character cannot take (the other faction's version)
+        -- sink below everything usable
+        local ua = a.srcType ~= ANx.SRC.QUEST or not a.objId or ANx.CharCanDoQuest(a.objId)
+        local ub = b.srcType ~= ANx.SRC.QUEST or not b.objId or ANx.CharCanDoQuest(b.objId)
+        if ua ~= ub then return ua end
+        return a.chance > b.chance
+    end)
     for _, s in ipairs(sorted) do
         local subText = SrcTypeLabel(s.srcType) .. (s.zoneName ~= "" and ("  -  " .. s.zoneName) or "")
         local rightText = "|cff00ff88" .. ANx.FormatChance(s.chance) .. "|r"
@@ -3285,7 +3305,11 @@ builders["sources"] = function(view)
                 hint = "already completed on this character"
             end
             if not ANx.CharCanDoQuest(s.objId) then
-                prefix = "|cffff6060[not your race/class] |r" .. prefix
+                local side = ANx.QuestFactionSide and ANx.QuestFactionSide(s.objId)
+                local lab = (side == "A" and "Alliance quest")
+                    or (side == "H" and "Horde quest") or "not your race/class"
+                prefix = "|cffff6060[" .. lab .. "] |r" .. prefix
+                hint = "this character cannot take this quest"
             end
             rowText = prefix .. s.objName .. (hasArrow and "  |cff33ff99>|r" or "")
             subText = subText .. "  |cff888888- " .. hint .. "|r"
@@ -3319,7 +3343,7 @@ local function SearchInstances(q, kind, respect)
     for _, inst in ipairs(ANx.Instances or {}) do
         if inst.kind == kind and inst.name:lower():find(q, 1, true) then
             for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
-                if (not respect) or ANx.DifficultyMatches(d.label) then
+                if (not respect) or ANx.DifficultyMatches(d.label, inst.map) then
                     local st = Engine.StatsWithBest(d.items, "i:" .. inst.map .. ":" .. d.diff,
                         inst.name, ANx.INSTANCE_DROP_SRC)
                     if st.total > 0 or not respect then
@@ -3412,7 +3436,7 @@ local function SearchQuests(q, respect)
         local zc = Engine.ZoneData(z)
         for _, qq in ipairs((zc and zc.questList) or {}) do
             if qq.name and qq.name:lower():find(q, 1, true)
-                and ((not respect) or ANx.QuestNodeAllowed(qq.id)) then
+                and ((not respect) or (ANx.QuestNodeAllowed(qq.id) and ANx.QuestForClassAllowed(qq.id))) then
                 local st = Engine.Stats(qq.items, "q:" .. z.zone .. ":" .. qq.id)
                 if st.total > 0 or not respect then
                     shown = shown + 1
@@ -3869,6 +3893,13 @@ function UI.Render()
     else
         f.filterBtn:Hide()
     end
+    if view.type == "quests" or (view.type == "items" and view.questId) then
+        SetChip(f.questClassBtn, "quests", "|cffdda0ff" .. ((ANx.db.questClass == "all")
+            and "All classes" or "My quests") .. "|r")
+        f.questClassBtn:Show()
+    else
+        f.questClassBtn:Hide()
+    end
     if ViewIsWorldDrop(view) then
         SetChip(f.raresBtn, "rare_spawn", "|cffff6a70" .. (ANx.db.raresOnly
             and "Rares only" or "All spawns") .. "|r")
@@ -4141,6 +4172,10 @@ function UI.UpdateHomePanel()
         local c = hp.exp[e]
         c.name:SetText(ANx.EXP_COLORS[e] .. ANx.EXP_NAMES[e] .. "|r")
         local sum = SummaryRow(e, UI.RefreshIfShown)
+        -- counting three whole expansions against COLD per-item caches is a
+        -- multi-second stall; until the background warm-up has walked the
+        -- items once, show placeholders (RefreshIfShown fires when it lands)
+        if sum and not Engine.CachesWarm() then sum = nil end
         if sum then
             local st = Engine.UnionStats(Engine.AllContentSets(sum), "sum:" .. e .. ":all:" .. DiffKey())
             local pct = (st.total > 0) and (st.attuned / st.total) or 0
@@ -4246,6 +4281,11 @@ function UI.FilterDefs(view)
     add("Attunes: " .. ((ANx.db.scope == "account") and "Account" or "Character"), function()
         ANx.db.scope = (ANx.db.scope == "account") and "char" or "account"
     end)
+    if view and (view.type == "quests" or (view.type == "items" and view.questId)) then
+        add("Quests: " .. ((ANx.db.questClass == "all") and "All classes" or "Mine"), function()
+            ANx.db.questClass = (ANx.db.questClass == "all") and "mine" or "all"
+        end)
+    end
     local fac = ANx.db.faction or "both"
     add("Faction: " .. ((fac == "A") and "Alliance" or (fac == "H") and "Horde" or "Both"), function()
         local c = ANx.db.faction or "both"

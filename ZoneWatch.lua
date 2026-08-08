@@ -44,7 +44,7 @@ local function LeftItems(zname)
     if inst then
         local seen, out = {}, {}
         for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
-            if ANx.DifficultyMatches(d.label) then
+            if ANx.DifficultyMatches(d.label, inst.map) then
                 for _, id in ipairs(d.items) do
                     if not seen[id] and Engine.Eligible(id) and not ANx.CountDone(id) then
                         seen[id] = true

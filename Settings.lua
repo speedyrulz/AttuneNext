@@ -99,7 +99,12 @@ local function BuildPanel()
             if ANx.UI and ANx.UI.ApplySkin then ANx.UI.ApplySkin() end
         end)
 
-    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 7,
+    controls.matchinst = MakeCheck("MatchInst", "In an instance, show only that difficulty", LX, LY + STEP * 7,
+        function() return ANx.db.matchInstance ~= false end,
+        function(v) ANx.db.matchInstance = v; if ANx.Engine then ANx.Engine.InvalidateStats() end
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end end)
+
+    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 8,
         function() return ANx.debug end,
         function(v) ANx.debug = v end)
 

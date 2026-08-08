@@ -99,10 +99,16 @@ function ANx.ResolveActionableQuest(qid)
 
         local row = pre[cur]
         local nextQuest = nil
+        -- chains fork per faction: an "either of" list can hold the Alliance
+        -- AND the Horde copy of the same step, and a parent can be the other
+        -- faction's version. Never walk into a quest this character cannot
+        -- take - that is how a Horde player got arrowed to the Alliance
+        -- "The Hand of Gul'dan".
+        local can = ANx.CharCanDoQuest
         if row then
             local parent, mode = row[2], row[3]
             -- parent quest must be active or completed for the child to exist
-            if parent > 0 and QuestState(parent) == nil then
+            if parent > 0 and QuestState(parent) == nil and can(parent) then
                 nextQuest = parent
             end
             if not nextQuest and mode == 1 then
@@ -112,21 +118,34 @@ function ANx.ResolveActionableQuest(qid)
                     if QuestState(row[i]) == "done" then satisfied = true break end
                 end
                 if not satisfied then
-                    -- prefer a prereq that's already in the log, else one with a known giver
+                    -- prefer a DOABLE prereq already in the log, else a doable
+                    -- one with a known giver, else the first doable one
                     for i = 4, #row do
-                        if QuestState(row[i]) == "inlog" then nextQuest = row[i] break end
+                        if QuestState(row[i]) == "inlog" and can(row[i]) then
+                            nextQuest = row[i] break
+                        end
                     end
                     if not nextQuest then
                         for i = 4, #row do
-                            if ANx.QuestGivers[row[i]] then nextQuest = row[i] break end
+                            if ANx.QuestGivers[row[i]] and can(row[i]) then
+                                nextQuest = row[i] break
+                            end
                         end
                     end
-                    nextQuest = nextQuest or row[4]
+                    if not nextQuest then
+                        for i = 4, #row do
+                            if can(row[i]) then nextQuest = row[i] break end
+                        end
+                    end
+                    -- every alternative is the other faction's: stop rather
+                    -- than route somewhere unusable
                 end
             elseif not nextQuest and mode == 2 then
                 -- ALL listed prereqs required
                 for i = 4, #row do
-                    if QuestState(row[i]) ~= "done" then nextQuest = row[i] break end
+                    if QuestState(row[i]) ~= "done" and can(row[i]) then
+                        nextQuest = row[i] break
+                    end
                 end
             end
         end
@@ -277,10 +296,16 @@ function ANx.ArrowToItem(itemId)
             string.format("|cff00ff88%.1f%%|r ", d.chance or 0)))
         return false
     end
-    -- 2) quest start
+    -- 2) quest start: dual-faction quests share rewards, so pick the version
+    -- THIS character can take - never arrow a Horde player to the Alliance
+    -- quest giver (or vice versa)
+    local blockedQuest
     for _, sc in ipairs(srcs) do
         if sc.srcType == S.QUEST and sc.objId then
-            return ANx.SetQuestWaypoint(sc.objId, sc.objName)
+            if ANx.CharCanDoQuest(sc.objId) then
+                return ANx.SetQuestWaypoint(sc.objId, sc.objName)
+            end
+            blockedQuest = blockedQuest or sc
         end
     end
     -- 3) closest vendor
@@ -307,6 +332,14 @@ function ANx.ArrowToItem(itemId)
         end
         ANx.Print(name .. " is crafted by |cffffff00" .. prof
             .. "|r (this character may not know it).")
+        return false
+    end
+    if blockedQuest then
+        local side = ANx.QuestFactionSide and ANx.QuestFactionSide(blockedQuest.objId)
+        ANx.Print(name .. " only comes from "
+            .. (side == "A" and "an |cff4a9eeaAlliance|r" or side == "H" and "a |cffff4040Horde|r"
+                or "another faction's/race's")
+            .. " quest this character cannot take.")
         return false
     end
     ANx.Print("No routable source for " .. name .. ".")

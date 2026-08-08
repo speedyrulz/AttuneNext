@@ -177,7 +177,17 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.4.6**
+- **New "Match my instance difficulty" option** (Options, the Interface panel; on by default): while you are standing inside a dungeon or raid, that instance'''s list shows only the difficulty you are actually in - e.g. only the 10-man in Ulduar-10, hiding the 25-man. It switches with you if you change difficulty in-game, only affects the instance you are physically in (other instances still show every difficulty), and turns off the moment you pick a manual Difficulty or Size filter. The instance HUD and the recommendation for that run follow the same narrowing.
+
+**v3.4.5**
+- **New "My quests" filter on quest pages** (chip on the quest screens, default on): hides quests your character'''s class or race can never take - like the class-locked ring trios - under either scope; flip it to *All classes* to see everything. Under Character scope, a reward obtainable ONLY through quests you can'''t take (e.g. *Band of Eternity* behind a warrior/paladin quest, seen by a Hunter) is also filtered from every list, count and recommendation; Account scope keeps it, since an alt can do the quest. The old always-on race/class hiding under Character scope moved into this filter.
+- Synastria'''s custom quests are not in the generated class data: masks for them can be added to `ANx.QuestClassExtra` / `ANx.QuestRaceExtra` (Core.lua). With `/an debug` on, quest rows show their quest id to make collecting these easy.
+
 **v3.4.4**
+- **Fixed the ~5s freeze on the first window open after a reload and on first visits to screens.** The counts on every screen were computed inline against cold per-item caches - the first pass resolved faction and bind by scanning item tooltips and enumerated every item'''s sources on the spot. A background warm-up now walks every item once right after the login scans (same 10ms-per-frame pump), so first renders find everything cached; until it finishes, the home cards show placeholders instead of stalling. `/an perf` now reports whether the caches are warm.
+- **Quest CHAINS pick your faction'''s steps too**: when a neutral quest (e.g. *Enraged Spirits of Air*) is unlocked by either faction'''s copy of a chain step (*The Hand of Gul'''dan*), the chain resolver now walks the version your character can take - a Horde player is sent to the Horde chain giver. If every alternative belongs to the other faction, it stops at the quest instead of routing somewhere unusable.
+- **Dual-faction quests route to YOUR faction'''s version.** Quests like *Besieged!* exist as an Alliance copy and a Horde copy sharing the same reward; the arrow, the *best source* line and the item'''s source list all used to pick whichever came first. They now prefer the version your character can actually take - a Horde player is arrowed to the Horde quest giver - the other faction'''s copy is tagged (*[Alliance quest]*) and sorted below, and if an item'''s only quest is truly the other faction'''s, the arrow says so instead of pointing at an unusable giver.
 - The **Horde/Alliance filter now gates quests properly**: quest rows for the other faction are hidden (quests missing from the curated faction data derive their side from their race requirements), and items obtainable **only** from the other faction'''s quests are filtered out of every list, count and recommendation. Items that also drop or are sold somewhere are unaffected, and neutral quests always pass.
 
 **v3.4.3**

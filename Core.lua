@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.4.4"
+ANx.VERSION = "3.4.6"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -35,16 +35,67 @@ ANx.DIFF_LABEL_TEXT = {
 }
 ANx.RAID_SIZE_LABELS = { all = "All", ["10"] = "10-man", ["25"] = "25-man" }
 
--- Does an instance-difficulty label pass the difficulty tier + raid-size filters?
-function ANx.DifficultyMatches(label)
+-- The difficulty label of the instance the player is physically in (cached;
+-- refreshed on zone changes). nil when not in a known instance.
+ANx._curInstLabel = nil
+ANx._curInstMap = nil
+
+function ANx.UpdateCurrentInstance()
+    local label, map
+    if _G.IsInInstance and _G.IsInInstance() then
+        local zone = (_G.GetRealZoneText and _G.GetRealZoneText()) or ""
+        for _, inst in ipairs(ANx.Instances or {}) do
+            if inst.name == zone then
+                map = inst.map
+                label = ANx.CurrentDifficultyLabel and ANx.CurrentDifficultyLabel(inst) or nil
+                local diffs = ANx.Engine and ANx.Engine.InstanceDiffs
+                    and ANx.Engine.InstanceDiffs(inst)
+                if diffs and #diffs == 1 then label = diffs[1].label end
+                break
+            end
+        end
+    end
+    local changed = (label ~= ANx._curInstLabel) or (map ~= ANx._curInstMap)
+    ANx._curInstLabel, ANx._curInstMap = label, map
+    if changed and ANx.db and ANx.db.matchInstance ~= false then
+        if ANx.Engine then ANx.Engine.InvalidateStats() end
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end
+end
+
+-- Does an instance-difficulty label pass the difficulty tier + raid-size
+-- filters? instMap (optional): the instance this label belongs to; when you
+-- are standing inside THAT instance and haven't set the manual chips, the
+-- list auto-narrows to the exact difficulty you are in (e.g. only 10-man
+-- while in Ulduar-10). Other instances and the summaries are unaffected.
+function ANx.DifficultyMatches(label, instMap)
     local d = ANx.db and ANx.db.difficulty or "all"
-    if d ~= "all" and (ANx.DIFF_TIER[label] or "normal") ~= d then return false end
     local sz = ANx.db and ANx.db.raidSize or "all"
+
+    if ANx.db and ANx.db.matchInstance ~= false and d == "all" and sz == "all"
+        and instMap and instMap == ANx._curInstMap and ANx._curInstLabel then
+        local cl = ANx._curInstLabel
+        if (ANx.DIFF_TIER[label] or "normal") ~= (ANx.DIFF_TIER[cl] or "normal") then
+            return false
+        end
+        local ls, cs = ANx.DIFF_SIZE[label], ANx.DIFF_SIZE[cl]
+        if cs and ls ~= cs then return false end   -- 10-man vs 25-man
+        return true
+    end
+
+    if d ~= "all" and (ANx.DIFF_TIER[label] or "normal") ~= d then return false end
     if sz ~= "all" then
         local ls = ANx.DIFF_SIZE[label]   -- nil = size-agnostic, always matches
         if ls and ls ~= sz then return false end
     end
     return true
+end
+
+-- Is the in-instance auto-narrow currently affecting this instance's list?
+function ANx.InstanceAutoNarrow(instMap)
+    return (ANx.db and ANx.db.matchInstance ~= false
+        and (ANx.db.difficulty or "all") == "all" and (ANx.db.raidSize or "all") == "all"
+        and instMap and instMap == ANx._curInstMap and ANx._curInstLabel) and true or false
 end
 
 -- Is any difficulty/size filter active? (for count adjustments)
@@ -120,6 +171,8 @@ local defaults = {
     stockFilter = "all",  -- vendor item lists: "all" / "limited" / "unlimited"
     affordableOnly = false,-- vendor screens: only items you can currently pay for
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
+    questClass = "mine",  -- quest pages: "mine" hides quests this class can't take
+    matchInstance = true, -- while inside an instance, its list shows only the difficulty you're in
     accessories = true,   -- show accessory-slot items (cloak/ring/neck/trinket)
     difficulty = "all",   -- dungeon/raid difficulty tier: "all"/"normal"/"heroic"/"mythic"
     raidSize = "all",     -- raid size: "all"/"10"/"25"
@@ -550,9 +603,12 @@ end
 
 function ANx.BindType(itemId)
     local c = bindCache[itemId]
-    if c ~= nil then return c or nil end   -- c == false means "resolved, unknown"
+    if c then return c end
+    -- a cached "unknown" must never shadow the static seed (the tooltip may
+    -- have been scanned before the item was in the client cache)
     local seed = ANx.ItemBind and ANx.ItemBind[itemId]
     if seed then bindCache[itemId] = seed; return seed end
+    if c == false then return nil end      -- resolved, genuinely unknown
     if not CreateFrame then return nil end
     if not bindTip then
         bindTip = CreateFrame("GameTooltip", "AttuneNextBindTip", nil, "GameTooltipTemplate")
@@ -708,6 +764,15 @@ end
 local Q_ALLIANCE_MASK = 1 + 4 + 8 + 64 + 1024      -- Human/Dwarf/NElf/Gnome/Draenei
 local Q_HORDE_MASK    = 2 + 16 + 32 + 128 + 512    -- Orc/Undead/Tauren/Troll/Belf
 
+-- Which side is the PLAYER on? ("A"/"H", from their race)
+function ANx.PlayerFactionSide()
+    local m = ANx.PlayerRaceMask()
+    if m == 0 then return nil end
+    if bit.band(m, Q_ALLIANCE_MASK) ~= 0 then return "A" end
+    if bit.band(m, Q_HORDE_MASK) ~= 0 then return "H" end
+    return nil
+end
+
 function ANx.QuestFactionSide(questId)
     if not questId then return nil end
     local f = ANx.QuestFaction and ANx.QuestFaction[questId]
@@ -775,16 +840,23 @@ function ANx.PlayerClassMask()
     return playerClassMask
 end
 
+-- Hand-curated masks for quests the generated DB does not know (Synastria's
+-- custom quests, e.g. the role-ring trios). Same DBC bitmask format.
+--   ANx.QuestClassExtra[questId] = class mask
+--   ANx.QuestRaceExtra[questId]  = race mask
+ANx.QuestClassExtra = ANx.QuestClassExtra or {}
+ANx.QuestRaceExtra = ANx.QuestRaceExtra or {}
+
 -- Can the CURRENT CHARACTER (race + class) ever complete this quest?
 -- Unknown quests / missing data count as doable.
 function ANx.CharCanDoQuest(questId)
     if not questId then return true end
-    local r = ANx.QuestRaces and ANx.QuestRaces[questId]
+    local r = (ANx.QuestRaces and ANx.QuestRaces[questId]) or ANx.QuestRaceExtra[questId]
     if r then
         local pm = ANx.PlayerRaceMask()
         if pm ~= 0 and bit.band(r, pm) == 0 then return false end
     end
-    local c = ANx.QuestClasses and ANx.QuestClasses[questId]
+    local c = (ANx.QuestClasses and ANx.QuestClasses[questId]) or ANx.QuestClassExtra[questId]
     if c then
         local pm = ANx.PlayerClassMask()
         if pm ~= 0 and bit.band(c, pm) == 0 then return false end
@@ -792,14 +864,18 @@ function ANx.CharCanDoQuest(questId)
     return true
 end
 
--- Full quest-node gate: faction filter always applies; under Character scope
--- quests this character's race/class can never complete are hidden too.
+-- Quest-page filter: "mine" (default) hides quests this character can never
+-- take; "all" shows everything.
+function ANx.QuestForClassAllowed(questId)
+    if ANx.db and ANx.db.questClass == "all" then return true end
+    return ANx.CharCanDoQuest(questId)
+end
+
+-- Quest-node gate: the faction filter. Race/class hiding is the "My quests"
+-- filter's job now (ANx.QuestForClassAllowed) - callers apply both, so the
+-- All-classes setting can actually reveal quests the old scope gate hid.
 function ANx.QuestNodeAllowed(questId)
-    if not ANx.NodeFactionAllowed("quest", questId) then return false end
-    if ANx.db and ANx.db.scope == "char" and not ANx.CharCanDoQuest(questId) then
-        return false
-    end
-    return true
+    return ANx.NodeFactionAllowed("quest", questId)
 end
 
 function ANx.IsAttunableAtAll(itemId)
@@ -1062,6 +1138,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "START_LOOT_ROLL" then
         if ANx.CheckLootRoll then ANx.CheckLootRoll(arg1) end
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        if ANx.UpdateCurrentInstance then ANx.UpdateCurrentInstance() end
         if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
         if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras) end
         if ANx.Plates then ANx.Plates.OnZone() end
@@ -1259,7 +1336,8 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
     elseif msg == "perf" then
         local st = ANx.Engine and ANx.Engine.PerfStats and ANx.Engine.PerfStats()
         if st then
-            ANx.Print(string.format("Lua memory: |cffffff00%d KB|r   background jobs: %d", st.lua_kb, st.jobs))
+            ANx.Print(string.format("Lua memory: |cffffff00%d KB|r   background jobs: %d   caches %s",
+                st.lua_kb, st.jobs, st.warm and "|cff00ff00warm|r" or "|cffffd100warming|r"))
             ANx.Print(string.format("caches: sources=%d  stats=%d  zones=%d  runs=%d  picks=%d  odds=%d",
                 st.srcCache, st.stats, st.zones, st.runsKeys, st.pickKeys, st.clearChance))
             collectgarbage("collect")

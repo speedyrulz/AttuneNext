@@ -25,6 +25,8 @@ local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
 local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
 local pickCache = {}       -- ["which|view"] -> { rev =, id = itemId or false }
 local questSideCache = {}  -- [itemId] = "A"/"H" (quest-only, one side) or false
+local questCharCache = {}  -- [itemId] = true when quest-only + no doable quest
+local cachesWarm = false   -- per-item filter caches walked once in the background
 local cacheDirty = false   -- structural data changed since the last export
 
 -- Bumped whenever anything that affects counts changes (filters, attunes,
@@ -57,6 +59,9 @@ function Engine.InvalidateAll()
     runsCache = {}
     pickCache = {}
     questSideCache = {}
+    questCharCache = {}
+    minLvlCache = {}
+    cachesWarm = false
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -234,6 +239,32 @@ pumpFrame:SetScript("OnUpdate", function()
                 cacheDirty = false
                 pcall(Engine.ExportCache)
             end
+            -- FIRST: walk every item once in the background to fill the
+            -- per-item filter caches (faction/bind tooltip scans, sources,
+            -- levels). Counts render inline, and computing them against COLD
+            -- caches is what froze the first open of every screen for
+            -- seconds - warm, they are a cheap sweep of native calls.
+            if not cachesWarm then
+                Engine.Enqueue(function()
+                    local items = Engine.Universe()
+                    for _, id in ipairs(items) do
+                        Engine.MaybeYield()
+                        Engine.Sources(id)
+                        ANx.FactionAllowed(id)
+                        local known = Engine.ItemMinLevel(id) ~= nil
+                        -- only resolve bind for items the client has data for:
+                        -- scanning an uncached item would bake in "unknown"
+                        if ANx.BindType and (known or (ANx.ItemBind and ANx.ItemBind[id])) then
+                            ANx.BindType(id)
+                        end
+                        if ANx.IsAccessory then ANx.IsAccessory(id) end
+                        Engine.ItemQuestSide(id)
+                    end
+                    cachesWarm = true
+                end, function()
+                    if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+                end, "warmup")
+            end
             -- keep the button's global pick warm so pressing it is instant
             if Engine.PickCached(nil, "btn") == nil then
                 Engine.PickAsync(nil, "btn")
@@ -303,17 +334,36 @@ end
 -- Best source for an item, preferring sources in the given zone name + src filter.
 -- Returns chance, sourceName, srcType, restricted(bool), zoneName
 -- returns chance, sourceName, srcType, restricted, zoneName, sourceRecord
+-- Quest sources this character can never take (the other faction's copy of
+-- a dual-version quest) must not win "best source" while a usable source
+-- exists - a Horde player should be shown the Horde quest giver.
+local function SourceUsable(s)
+    if s.srcType ~= ANx.SRC.QUEST or not s.objId then return true end
+    return ANx.CharCanDoQuest(s.objId)
+end
+
 function Engine.BestSource(itemId, zoneName, srcFilter)
-    local best, bestAny
+    local best, bestAny, bestBlocked, bestAnyBlocked
     for _, s in ipairs(Engine.Sources(itemId)) do
         local typeOk = (not srcFilter) or srcFilter[s.srcType]
         if typeOk then
-            if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
-            if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
-                if (not best) or s.chance > best.chance then best = s end
+            if SourceUsable(s) then
+                if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
+                if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
+                    if (not best) or s.chance > best.chance then best = s end
+                end
+            else
+                if (not bestAnyBlocked) or s.chance > bestAnyBlocked.chance then bestAnyBlocked = s end
+                if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
+                    if (not bestBlocked) or s.chance > bestBlocked.chance then bestBlocked = s end
+                end
             end
         end
     end
+    -- usable sources always outrank blocked ones; blocked are a last resort
+    -- so account-scope displays still have something to show
+    best = best or bestBlocked
+    bestAny = bestAny or bestAnyBlocked
     if best then return best.chance, best.objName, best.srcType, true, best.zoneName, best end
     if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName, bestAny end
     return nil
@@ -456,6 +506,26 @@ function Engine.ItemQuestSide(itemId)
     return side
 end
 
+-- Quest-only items where EVERY quest is impossible for this character
+-- (class- or race-locked): the item can be attunable yet unreachable, like
+-- the role rings behind class-locked quest trios.
+function Engine.ItemQuestCharBlocked(itemId)
+    local c = questCharCache[itemId]
+    if c ~= nil then return c end
+    local blocked = false
+    if Engine.IsQuestOnly(itemId) then
+        blocked = true
+        for _, src in ipairs(Engine.Sources(itemId)) do
+            if src.srcType == ANx.SRC.QUEST and ANx.CharCanDoQuest(src.objId) then
+                blocked = false
+                break
+            end
+        end
+    end
+    questCharCache[itemId] = blocked
+    return blocked
+end
+
 function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
     -- an item ONLY obtainable from the other faction's quests is as
@@ -465,6 +535,10 @@ function Engine.Eligible(itemId)
         local qs = Engine.ItemQuestSide(itemId)
         if qs and qs ~= fac then return false end
     end
+    -- under Character scope with the quest-class filter on, a reward whose
+    -- every quest is impossible for this character is unreachable: hide it
+    if ANx.db and ANx.db.scope == "char" and ANx.db.questClass ~= "all"
+        and Engine.ItemQuestCharBlocked(itemId) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
@@ -1253,6 +1327,14 @@ local function BuildSummary(exp)
 end
 
 -- Returns summary sets or nil if still scanning (auto-enqueues the scan)
+function Engine.CachesWarm()
+    return cachesWarm
+end
+
+function Engine._TestUnwarm()   -- regression coverage only
+    cachesWarm = false
+end
+
 -- Rough cache/memory accounting for /an perf
 function Engine.PerfStats()
     local function count(t)
@@ -1269,6 +1351,7 @@ function Engine.PerfStats()
         stats = count(statsCache),
         zones = count(zoneCache),
         jobs = #Engine.scanJobs,
+        warm = cachesWarm,
     }
 end
 
@@ -1463,10 +1546,21 @@ end
 -- nil = the client cannot say (item info unavailable). The level gate treats
 -- that as "does not pass": an item we cannot verify must not be recommended,
 -- or uncached high-level vendor stock slips straight through the filter.
+local minLvlCache = {}
 function Engine.ItemMinLevel(id)
+    local c = minLvlCache[id]
+    if c ~= nil then
+        if c == false then return nil end
+        return c
+    end
     local name, _, _, _, minLvl = (_G.GetItemInfoCustom or _G.GetItemInfo or function() end)(id)
-    if name == nil and minLvl == nil then return nil end
-    return tonumber(minLvl) or 0
+    if name == nil and minLvl == nil then
+        minLvlCache[id] = false      -- unknown to the client (so far)
+        return nil
+    end
+    local v = tonumber(minLvl) or 0
+    minLvlCache[id] = v
+    return v
 end
 
 -- Does this item pass the current-level filter? (true when the gate is off)
@@ -1720,7 +1814,7 @@ function Engine.RankInstanceRuns(view, yielding, which)
                 if inst then
                 for _, d in ipairs(Engine.InstanceDiffs(inst)) do
                     if yielding then Engine.YieldNow() end
-                    if ANx.DifficultyMatches(d.label) then
+                    if ANx.DifficultyMatches(d.label, inst.map) then
                         local instKey = inst.map .. ":" .. d.diff
                         if not ignoreInst[instKey] then
                             local expected, count = 0, 0
@@ -2004,7 +2098,7 @@ function Engine.GoalStatus(goal)
     else
         for _, inst in ipairs(Engine.InstancesFor(goal.exp, goal.content) or {}) do
             for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
-                if ANx.DifficultyMatches(d.label) then
+                if ANx.DifficultyMatches(d.label, inst.map) then
                     for _, id in ipairs(d.items) do addItem(id) end
                 end
             end
