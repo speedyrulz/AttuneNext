@@ -177,6 +177,16 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+**v3.5.1**
+- **Prestige mode** (Options toggle, off by default). After prestiging you attune as two classes at once, so this unlocks a **Class filter chip** on every list: pick a class and everything narrows to gear it can use - its armor types, learnable weapon types, its relic, and explicit "Classes: ..." tooltip locks (which always win). Cloaks, rings, necks and trinkets count for every class; items the client hasn't seen yet are never hidden. Counts, What's Left, recommendations and nameplates (respect-filters mode) all follow it. Turning the toggle off resets the filter.
+- **"Class filter means"** (second option, shown while Prestige mode is on): *The class's own gear* (default - a Warrior does not pass cloth) or *Anything it can equip* (physical equip rules - a Warrior passes cloth too). Weapons, shields, relics and class locks stay strict in both.
+
+**v3.5.0**
+- **Large memory-use reduction.** The addon was retaining the raw source data (heavy multi-field records) for *every* attunable item in the database for the whole session - hundreds of MB on big accounts. It now keeps only a small bounded working set of sources (the handful you actually view/rank), releasing the full set once the background scan has distilled everything into the compact filter caches that counts and filters actually use. Also stopped storing a per-zone item list that was never read again, and made the recommendation'''s "has a source?" check count-only instead of building the full record. `/an perf` shows the numbers; `/an flush` reclaims the source cache on demand.
+
+**v3.4.7**
+- **Fixed Quests, World Drops and Vendors showing 0 in What's Left (and empty zone browsing) on non-English clients.** Those categories classified each item by matching its source'''s zone name against the addon'''s English zone names, so a localized client (e.g. Russian) never matched and zeroed all three - while dungeons/raids (matched by numeric map id) worked fine. Zone items are now attributed by the loot DB'''s own per-zone list, falling back to the item'''s source types when the source zone names aren'''t recognized. English clients are unaffected.
+
 **v3.4.6**
 - **New "Match my instance difficulty" option** (Options, the Interface panel; on by default): while you are standing inside a dungeon or raid, that instance'''s list shows only the difficulty you are actually in - e.g. only the 10-man in Ulduar-10, hiding the 25-man. It switches with you if you change difficulty in-game, only affects the instance you are physically in (other instances still show every difficulty), and turns off the moment you pick a manual Difficulty or Size filter. The instance HUD and the recommendation for that run follow the same narrowing.
 

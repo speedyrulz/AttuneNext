@@ -104,7 +104,16 @@ local function BuildPanel()
         function(v) ANx.db.matchInstance = v; if ANx.Engine then ANx.Engine.InvalidateStats() end
             if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end end)
 
-    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 8,
+    controls.prestige = MakeCheck("Prestige", "Prestige mode (adds a Class filter chip)", LX, LY + STEP * 8,
+        function() return ANx.db.prestige == true end,
+        function(v)
+            ANx.db.prestige = v
+            if not v then ANx.db.classFilter = "all" end
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+        end)
+
+    controls.debug = MakeCheck("Debug", "Debug logging (chat)", LX, LY + STEP * 9,
         function() return ANx.debug end,
         function(v) ANx.debug = v end)
 

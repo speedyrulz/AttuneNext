@@ -13,7 +13,10 @@ ANx.Engine = Engine
 local instDiffCache = {}   -- ["map:diff"]    -> { itemIds }
 local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
 local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
-local srcCache      = {}   -- [itemId]        -> sources array
+local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
+local srcCacheN     = 0    -- entries in srcCache
+local SRC_CACHE_CAP = 3000 -- flush past this: source arrays are heavy and only
+                           -- a handful of items are ever viewed at once
 local zexCache      = {}   -- [itemId]        -> bool: drops in exactly one zone
 local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
 local eventItemsCache = {} -- [eventName]     -> { itemIds }
@@ -50,6 +53,7 @@ end
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
+    srcCacheN = 0
     if Engine.InvalidateQuestOnly then Engine.InvalidateQuestOnly() end
     zexCache = {}
     limitedItemsSet = nil
@@ -175,6 +179,7 @@ end
 function Engine.ForceRescan()
     if ANx.db then ANx.db.structCache = nil end
     if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
+    if ANx.InvalidateClassLockCache then ANx.InvalidateClassLockCache() end
     if ANx.InvalidateAccessoryCache then ANx.InvalidateAccessoryCache() end
     if ANx.InvalidateFactionCache then ANx.InvalidateFactionCache() end
     Engine.InvalidateAll()
@@ -261,6 +266,9 @@ pumpFrame:SetScript("OnUpdate", function()
                         Engine.ItemQuestSide(id)
                     end
                     cachesWarm = true
+                    -- the per-item filter caches are built; the raw source
+                    -- arrays for the whole universe are no longer needed
+                    Engine.FlushSources()
                 end, function()
                     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
                 end, "warmup")
@@ -295,13 +303,37 @@ end
 -- ---------------------------------------------------------------------
 -- Sources (cached per item)
 -- ---------------------------------------------------------------------
+-- Does the item have any source at all? Count-only - avoids building (and
+-- caching) the heavy source array just to test presence.
+function Engine.HasAnySource(itemId)
+    if not (ANx.LootDbLoaded() and _G.ItemLocGetSourceCount) then return false end
+    local ok, n = pcall(_G.ItemLocGetSourceCount, itemId)
+    return ok and n and n > 0
+end
+
 function Engine.Sources(itemId)
     local s = srcCache[itemId]
     if not s then
+        -- keep only a working set: source records are named-key tables (~8
+        -- fields each), so caching every item in a big DB burned hundreds of
+        -- MB. Filters/counts use the small derived caches, not this - only
+        -- the items actually viewed/ranked need their raw sources.
+        if srcCacheN >= SRC_CACHE_CAP then
+            srcCache = {}
+            srcCacheN = 0
+        end
         s = ANx.GetSources(itemId)
         srcCache[itemId] = s
+        srcCacheN = srcCacheN + 1
     end
     return s
+end
+
+-- Drop the raw-source working set (rebuilds on demand). Called once the
+-- background warm-up has distilled everything into the small filter caches.
+function Engine.FlushSources()
+    srcCache = {}
+    srcCacheN = 0
 end
 
 -- true when EVERY source of the item is a quest reward (can't be forged)
@@ -329,6 +361,21 @@ end
 local function ZoneNameMatch(a, b)
     if not a or not b then return false end
     return a:lower() == b:lower()
+end
+
+-- Every zone name the addon knows, lowercased. Used to tell an English client
+-- (source zoneNames are recognizable) from a localized one (they are not).
+local knownZoneNames
+function Engine.KnownZoneNameSet()
+    if knownZoneNames then return knownZoneNames end
+    knownZoneNames = {}
+    for _, z in ipairs(ANx.Zones or {}) do
+        if z.name then knownZoneNames[z.name:lower()] = true end
+    end
+    for _, inst in ipairs(ANx.Instances or {}) do
+        if inst.name then knownZoneNames[inst.name:lower()] = true end
+    end
+    return knownZoneNames
 end
 
 -- Best source for an item, preferring sources in the given zone name + src filter.
@@ -542,6 +589,9 @@ function Engine.Eligible(itemId)
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
+    -- prestige: the manual Class filter narrows every list to one class's gear
+    if ANx.db and ANx.db.prestige and (ANx.db.classFilter or "all") ~= "all"
+        and not ANx.ItemUsableByClass(itemId, ANx.db.classFilter) then return false end
     -- the on-screen Current level filter is a WINDOW filter: with it on, every
     -- list, count and card hides items whose required level the character does
     -- not meet (vendor stock included)
@@ -561,7 +611,9 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
 
     local universe = ANx.ItemsInZone(zoneEntry.zone)
     zc = {
-        universe = universe,
+        -- NOTE: the raw `universe` array is intentionally NOT stored - it is
+        -- only needed while classifying below, and keeping one per zone was
+        -- pure dead weight in the cache (and in the saved structure blob).
         quest = {},          -- itemIds with a quest source in this zone
         questList = {},      -- { {id=questId, name=questName, items={itemIds}} }
         world = {},          -- itemIds that drop from creatures/objects in this zone
@@ -570,12 +622,30 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
         vendorIdByName = {}, -- [vendorName] = npcId
     }
     local questsById = {}
+    local known = Engine.KnownZoneNameSet()
+    local zLower = (zoneEntry.name or ""):lower()
     for _, itemId in ipairs(universe) do
         if inCoroutine then Engine.MaybeYield() end
         local sources = Engine.Sources(itemId)
+        -- The loot DB already scoped this item to THIS zone by its numeric id,
+        -- so it belongs here. We name-match source rows only to attribute the
+        -- correct source type. On a localized client the server's source
+        -- zoneNames won't match the addon's English names, so nothing would
+        -- classify: detect that (no source names a zone we recognise) and fall
+        -- back to the item's own source types.
+        local matchedThisZone, recognized = false, false
+        for _, s in ipairs(sources) do
+            local zn = s.zoneName
+            if zn and zn ~= "" then
+                local zl = zn:lower()
+                if zl == zLower then matchedThisZone = true end
+                if known[zl] then recognized = true end
+            end
+        end
+        local fallback = (not matchedThisZone) and (not recognized)
         local isQuest, isWorld, isVendor = false, false, false
         for _, s in ipairs(sources) do
-            if ZoneNameMatch(s.zoneName, zoneEntry.name) then
+            if fallback or ZoneNameMatch(s.zoneName, zoneEntry.name) then
                 if s.srcType == ANx.SRC.QUEST then
                     isQuest = true
                     local q = questsById[s.objId]
@@ -739,6 +809,8 @@ function Engine.ScopeLeft(itemId, scope)
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
+    if ANx.db and ANx.db.prestige and (ANx.db.classFilter or "all") ~= "all"
+        and not ANx.ItemUsableByClass(itemId, ANx.db.classFilter) then return false end
     return true
 end
 
@@ -1345,6 +1417,7 @@ function Engine.PerfStats()
     return {
         lua_kb = math.floor(collectgarbage("count")),
         srcCache = count(srcCache),
+        srcCap = SRC_CACHE_CAP,
         runsKeys = count(runsCache),
         pickKeys = count(pickCache),
         clearChance = count(clearChanceCache),
@@ -1592,7 +1665,7 @@ function Engine.AttuneNextPick(view, opts)
     for _, id in ipairs(items) do
         if yielding then Engine.MaybeYield() end
         if not seen[id] and not ignore[id] and Engine.Eligible(id)
-            and not ANx.CountDone(id) and #Engine.Sources(id) > 0
+            and not ANx.CountDone(id) and Engine.HasAnySource(id)
             and Engine.ItemLevelOk(id, levelOn, charLvl) then
             seen[id] = true
             pool[#pool + 1] = id

@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.4.6"
+ANx.VERSION = "3.5.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -173,6 +173,10 @@ local defaults = {
     bindFilter = "both",  -- item lists: "both" / "bop" / "boe"
     questClass = "mine",  -- quest pages: "mine" hides quests this class can't take
     matchInstance = true, -- while inside an instance, its list shows only the difficulty you're in
+    prestige = false,     -- prestige mode: unlocks the manual Class filter chip
+    classFilter = "all",  -- prestige only: narrow lists to gear one class can use
+    classFilterMode = "gear", -- what the Class filter means: "gear" = the class's
+                          -- own armor types; "equip" = anything it can physically wear
     accessories = true,   -- show accessory-slot items (cloak/ring/neck/trinket)
     difficulty = "all",   -- dungeon/raid difficulty tier: "all"/"normal"/"heroic"/"mythic"
     raidSize = "all",     -- raid size: "all"/"10"/"25"
@@ -687,6 +691,174 @@ function ANx.BindAllowed(itemId)
     if f == "bop" then return b == "BOP" end
     if f == "boe" then return b == "BOE" end
     return true
+end
+
+-- ---------------------------------------------------------------------
+-- Prestige: which class can use an item?
+-- After prestiging, a character attunes as TWO classes at once, so the
+-- Class filter chip (unlocked by the Prestige mode option) lets you look at
+-- one class's gear at a time. "Class-appropriate" means: the armor types the
+-- class wears (cloaks and misc/accessories count for everyone), the weapon
+-- types it can learn, its own relic, and any explicit "Classes: ..." lock on
+-- the tooltip (which always wins - tier pieces etc.). Anything the client
+-- doesn't know yet passes, so the filter never hides items by accident.
+-- ---------------------------------------------------------------------
+ANx.CLASS_ORDER = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST",
+                    "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }
+ANx.CLASS_LABELS = {
+    WARRIOR = "Warrior", PALADIN = "Paladin", HUNTER = "Hunter", ROGUE = "Rogue",
+    PRIEST = "Priest", DEATHKNIGHT = "Death Knight", SHAMAN = "Shaman",
+    MAGE = "Mage", WARLOCK = "Warlock", DRUID = "Druid",
+}
+ANx.CLASS_HEX = {  -- standard class colors
+    WARRIOR = "c79c6e", PALADIN = "f58cba", HUNTER = "abd473", ROGUE = "fff569",
+    PRIEST = "ffffff", DEATHKNIGHT = "c41f3b", SHAMAN = "0070de",
+    MAGE = "69ccf0", WARLOCK = "9482c9", DRUID = "ff7d0a",
+}
+
+local function ClassSet(...)
+    local t = {}
+    for _, c in ipairs({ ... }) do t[c] = true end
+    return t
+end
+
+-- Armor the class actually wears (leveling types included: a DK in mail, a
+-- shaman in leather). Cloth is the caster classes' own armor.
+local CLASS_ARMOR = {
+    Cloth   = ClassSet("PRIEST", "MAGE", "WARLOCK"),
+    Leather = ClassSet("ROGUE", "DRUID", "HUNTER", "SHAMAN"),
+    Mail    = ClassSet("HUNTER", "SHAMAN", "WARRIOR", "PALADIN", "DEATHKNIGHT"),
+    Plate   = ClassSet("WARRIOR", "PALADIN", "DEATHKNIGHT"),
+    Shields = ClassSet("WARRIOR", "PALADIN", "SHAMAN"),
+    Librams = ClassSet("PALADIN"),
+    Idols   = ClassSet("DRUID"),
+    Totems  = ClassSet("SHAMAN"),
+    Sigils  = ClassSet("DEATHKNIGHT"),
+    -- Miscellaneous (rings, trinkets, necks, held items, shirts): everyone
+}
+
+-- "Can equip" mode: the four armor materials loosen to physical equip rules
+-- (anyone can wear lower armor - a warrior CAN equip cloth). Shields, relics,
+-- weapons and tooltip locks are hard restrictions and stay strict.
+local CLASS_ARMOR_EQUIP = {
+    Cloth   = ClassSet("WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST",
+                       "DEATHKNIGHT", "SHAMAN", "MAGE", "WARLOCK", "DRUID"),
+    Leather = ClassSet("WARRIOR", "PALADIN", "HUNTER", "ROGUE",
+                       "DEATHKNIGHT", "SHAMAN", "DRUID"),
+    Mail    = ClassSet("WARRIOR", "PALADIN", "HUNTER", "SHAMAN", "DEATHKNIGHT"),
+    Plate   = ClassSet("WARRIOR", "PALADIN", "DEATHKNIGHT"),
+}
+
+-- Weapon skills each class can learn (3.3.5 trainers, max)
+local CLASS_WEAPON = {
+    ["Daggers"]           = ClassSet("WARRIOR", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID"),
+    ["Fist Weapons"]      = ClassSet("WARRIOR", "HUNTER", "ROGUE", "SHAMAN", "DRUID"),
+    ["One-Handed Axes"]   = ClassSet("WARRIOR", "PALADIN", "HUNTER", "ROGUE", "SHAMAN", "DEATHKNIGHT"),
+    ["Two-Handed Axes"]   = ClassSet("WARRIOR", "PALADIN", "HUNTER", "SHAMAN", "DEATHKNIGHT"),
+    ["One-Handed Maces"]  = ClassSet("WARRIOR", "PALADIN", "ROGUE", "PRIEST", "SHAMAN", "DRUID", "DEATHKNIGHT"),
+    ["Two-Handed Maces"]  = ClassSet("WARRIOR", "PALADIN", "SHAMAN", "DRUID", "DEATHKNIGHT"),
+    ["One-Handed Swords"] = ClassSet("WARRIOR", "PALADIN", "HUNTER", "ROGUE", "MAGE", "WARLOCK", "DEATHKNIGHT"),
+    ["Two-Handed Swords"] = ClassSet("WARRIOR", "PALADIN", "HUNTER", "DEATHKNIGHT"),
+    ["Polearms"]          = ClassSet("WARRIOR", "PALADIN", "HUNTER", "DRUID", "DEATHKNIGHT"),
+    ["Staves"]            = ClassSet("WARRIOR", "HUNTER", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID"),
+    ["Bows"]              = ClassSet("WARRIOR", "HUNTER", "ROGUE"),
+    ["Guns"]              = ClassSet("WARRIOR", "HUNTER", "ROGUE"),
+    ["Crossbows"]         = ClassSet("WARRIOR", "HUNTER", "ROGUE"),
+    ["Thrown"]            = ClassSet("WARRIOR", "HUNTER", "ROGUE"),
+    ["Wands"]             = ClassSet("PRIEST", "MAGE", "WARLOCK"),
+    -- Fishing Poles / Miscellaneous: everyone
+}
+
+-- Reverse map: localized class name (tooltip text) -> class token. Works on
+-- any client locale via the game's own LOCALIZED_CLASS_NAMES tables.
+local classNameToToken
+local function ClassToken(name)
+    if not classNameToToken then
+        classNameToToken = {}
+        for _, tbl in ipairs({ _G.LOCALIZED_CLASS_NAMES_MALE, _G.LOCALIZED_CLASS_NAMES_FEMALE }) do
+            if type(tbl) == "table" then
+                for token, localized in pairs(tbl) do
+                    classNameToToken[localized] = token
+                end
+            end
+        end
+        for token, label in pairs(ANx.CLASS_LABELS) do   -- English fallback
+            classNameToToken[label] = classNameToToken[label] or token
+        end
+    end
+    return classNameToToken[name]
+end
+
+-- The "Classes: X, Y" tooltip lock, as a token set; false = no lock;
+-- nil = not resolvable yet (item not in the client cache).
+local classLockCache = {}
+local classLockPattern
+function ANx.ClassLock(itemId)
+    local c = classLockCache[itemId]
+    if c ~= nil then return c or nil end
+    if not CreateFrame then return nil end
+    if not bindTip then
+        bindTip = CreateFrame("GameTooltip", "AttuneNextBindTip", nil, "GameTooltipTemplate")
+        bindTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    end
+    bindTip:ClearLines()
+    local ok = pcall(bindTip.SetHyperlink, bindTip, "item:" .. itemId)
+    if not ok then return nil end
+    local n = bindTip:NumLines()
+    if not n or n == 0 then return nil end   -- not cached yet; retry later
+    if not classLockPattern then
+        -- the client's own (localized) "Classes: %s" format, as a pattern
+        local fmt = _G.ITEM_CLASSES_ALLOWED or "Classes: %s"
+        classLockPattern = "^" .. fmt:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+                                     :gsub("%%%%s", "(.+)")
+    end
+    local lock = false
+    for i = 1, n do
+        local fs = _G["AttuneNextBindTipTextLeft" .. i]
+        local t = fs and fs:GetText()
+        local names = t and t:match(classLockPattern)
+        if names then
+            for name in names:gmatch("([^,]+)") do
+                local token = ClassToken(name:match("^%s*(.-)%s*$"))
+                if token then
+                    if not lock then lock = {} end
+                    lock[token] = true
+                end
+            end
+            break
+        end
+    end
+    classLockCache[itemId] = lock
+    return lock or nil
+end
+
+-- Can gear of this item's kind be used by `token`? (see block comment above)
+function ANx.ItemUsableByClass(itemId, token)
+    if not token or token == "all" then return true end
+    local lock = ANx.ClassLock(itemId)
+    if lock then return lock[token] == true end
+    local _, _, _, _, _, itype, isub, _, equipLoc = _G.GetItemInfo(itemId)
+    if not itype then return true end            -- unknown: never hide
+    if equipLoc == "INVTYPE_CLOAK" then return true end
+    if itype == "Armor" then
+        local set = CLASS_ARMOR[isub]
+        if set and (ANx.db and ANx.db.classFilterMode) == "equip" then
+            set = CLASS_ARMOR_EQUIP[isub] or set   -- materials loosen; shields/relics stay
+        end
+        if set then return set[token] == true end
+        return true                              -- Miscellaneous / unknown subtype
+    end
+    if itype == "Weapon" then
+        local set = CLASS_WEAPON[isub]
+        if set then return set[token] == true end
+        return true                              -- fishing poles / misc
+    end
+    return true
+end
+
+function ANx.InvalidateClassLockCache()
+    classLockCache = {}
+    classNameToToken = nil
 end
 
 -- ---------------------------------------------------------------------
@@ -1343,6 +1515,13 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
             collectgarbage("collect")
             ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
         end
+    elseif msg == "flush" then
+        local before = math.floor(collectgarbage("count"))
+        if ANx.Engine and ANx.Engine.FlushSources then ANx.Engine.FlushSources() end
+        collectgarbage("collect")
+        local after = math.floor(collectgarbage("count"))
+        ANx.Print(string.format("Flushed the source cache: |cffffff00%d KB|r -> |cff00ff00%d KB|r (freed %d KB).",
+            before, after, before - after))
     elseif msg == "plates report" then
         if ANx.Plates then ANx.Plates.Report() end
     elseif msg == "plates why" then
@@ -1360,7 +1539,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
     elseif msg == "help" then
-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an perf, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an perf, /an flush, /an src <itemId>, /an scale <n>, /an reset, /an debug")
     else
         if ANx.UI then ANx.UI.Toggle() end
     end

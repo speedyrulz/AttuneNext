@@ -946,6 +946,23 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
+    f.classBtn = Chip("AttuneNextClassBtn", "character", "Class filter (Prestige)",
+        "Cycle which class's gear is shown. Unlocked by Prestige mode in Options.", function()
+        local order = ANx.CLASS_ORDER
+        local c = ANx.db.classFilter or "all"
+        if c == "all" then
+            ANx.db.classFilter = order[1]
+        else
+            local nxt = "all"
+            for i, v in ipairs(order) do
+                if v == c then nxt = order[i + 1] or "all"; break end
+            end
+            ANx.db.classFilter = nxt
+        end
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+
     f.sortBtn = Chip("AttuneNextSortBtn", "sort", "Sort",
         "Change how this list is ordered.", function()
         CycleSort(UI.Current())
@@ -1877,7 +1894,7 @@ end
 -- ---- favorites -------------------------------------------------------
 local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "bindFilter",
     "accessories", "difficulty", "raidSize", "raresOnly", "vendorFilter", "questClass",
-    "stockFilter", "affordableOnly" }
+    "stockFilter", "affordableOnly", "classFilter" }
 
 local function FilterSnapshot(viewType)
     local f = {}
@@ -1897,6 +1914,9 @@ local function FilterSummary(f)
     if f.difficulty and f.difficulty ~= "all" then p[#p + 1] = (ANx.DIFF_TIER_LABELS[f.difficulty] or f.difficulty) end
     if f.raidSize and f.raidSize ~= "all" then p[#p + 1] = (ANx.RAID_SIZE_LABELS[f.raidSize] or f.raidSize) end
     if f.raresOnly then p[#p + 1] = "Rares" end
+    if f.classFilter and f.classFilter ~= "all" then
+        p[#p + 1] = ANx.CLASS_LABELS[f.classFilter] or f.classFilter
+    end
     if f.stockFilter and f.stockFilter ~= "all" then p[#p + 1] = f.stockFilter .. " stock" end
     if f.affordableOnly then p[#p + 1] = "Affordable" end
     if #p == 0 then return "default filters" end
@@ -2837,6 +2857,28 @@ builders["options"] = function(view)
         "Inside a dungeon/raid, its list shows only the difficulty you're in (e.g. 10-man while in Ulduar-10). Turns off the moment you pick a Difficulty or Size filter.",
         function() return ANx.db.matchInstance ~= false end,
         function(v) ANx.db.matchInstance = v; if ANx.Engine then ANx.Engine.InvalidateStats() end end)
+    optToggle("Prestige mode",
+        "After prestiging you attune as two classes at once. This adds a Class filter chip to every list, so you can look at one class's gear (its armor and weapon types, its relic, class-locked sets) at a time.",
+        function() return ANx.db.prestige == true end,
+        function(v)
+            ANx.db.prestige = v
+            if not v then ANx.db.classFilter = "all" end
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+        end)
+    if ANx.db.prestige then
+        local equip = (ANx.db.classFilterMode == "equip")
+        AddRow({
+            text = "Class filter means:  |cffffd100" .. (equip and "Anything it can equip" or "The class's own gear") .. "|r",
+            sub = equip
+                and "Every armor type the class can physically wear counts (a Warrior passes cloth). Weapons, shields, relics and class locks stay strict."
+                or "Only the class's own armor types count (a Warrior does not pass cloth), plus its weapons, relic and class-locked sets.",
+            onClick = function()
+                ANx.db.classFilterMode = equip and "gear" or "equip"
+                Engine.InvalidateStats()
+                UI.Render()
+            end,
+        })
+    end
     do
         local mode = ANx.TimeMode()
         AddRow({
@@ -2886,7 +2928,7 @@ builders["options"] = function(view)
             ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 1
             ANx.db.zoneExclusive = false; ANx.db.stockFilter = "all"
             ANx.db.vendorFilter = "all"; ANx.db.raresOnly = false; ANx.db.sort = {}
-            ANx.db.questClass = "mine"
+            ANx.db.questClass = "mine"; ANx.db.classFilter = "all"
             Engine.InvalidateStats()
             ANx.Print("Filters reset to defaults.")
             UI.Render()
@@ -3858,6 +3900,15 @@ function UI.Render()
         and "Accessories On" or "Accessories Off") .. "|r")
     SetChip(f.zexBtn, "zone_exclusive", "|cffff9d45" .. (ANx.db.zoneExclusive
         and "Zone-excl. On" or "Zone-excl. Off") .. "|r")
+    if ANx.db.prestige then
+        local cf = ANx.db.classFilter or "all"
+        SetChip(f.classBtn, "character", (cf == "all") and "|cffd8c8a8Class: All|r"
+            or ("|cff" .. (ANx.CLASS_HEX[cf] or "ffffff")
+                .. "Class: " .. (ANx.CLASS_LABELS[cf] or cf) .. "|r"))
+        f.classBtn:Show()
+    else
+        f.classBtn:Hide()
+    end
 
     -- per-view chips
     if ViewSortModes(view) then
@@ -4302,6 +4353,24 @@ function UI.FilterDefs(view)
     add("Accessories: " .. ((ANx.db.accessories ~= false) and "On" or "Off"), function()
         ANx.db.accessories = not (ANx.db.accessories ~= false)
     end)
+    if ANx.db.prestige then
+        local cf = ANx.db.classFilter or "all"
+        local label = (cf == "all") and "All"
+            or ("|cff" .. (ANx.CLASS_HEX[cf] or "ffffff") .. (ANx.CLASS_LABELS[cf] or cf) .. "|r")
+        add("Class: " .. label, function()
+            local order = ANx.CLASS_ORDER
+            local c = ANx.db.classFilter or "all"
+            if c == "all" then
+                ANx.db.classFilter = order[1]
+            else
+                local nxt = "all"
+                for i, v in ipairs(order) do
+                    if v == c then nxt = order[i + 1] or "all"; break end
+                end
+                ANx.db.classFilter = nxt
+            end
+        end)
+    end
     add("Zone-excl: " .. (ANx.db.zoneExclusive and "On" or "Off"), function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
     end)
