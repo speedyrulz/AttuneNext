@@ -201,10 +201,7 @@ local function BuildPanel()
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end)
     MakeButton(nil, "Reset filters", 304, 138, function()
-        ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 1
-        ANx.db.zoneExclusive = false; ANx.db.stockFilter = "all"
-        ANx.db.vendorFilter = "all"; ANx.db.raresOnly = false; ANx.db.sort = {}
-        if ANx.Engine then ANx.Engine.InvalidateStats() end
+        ANx.ResetFilters()
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
         ANx.Print("Filters reset to defaults.")
     end)
@@ -233,7 +230,8 @@ local function BuildPanel()
         scale:SetValue(ANx.db and ANx.db.scale or 1)
         for _, cb in pairs({ controls.minimap, controls.tooltip, controls.alerts,
                              controls.zonewatch, controls.zonehud, controls.goalhud,
-                             controls.classic, controls.debug, controls.ctx,
+                             controls.classic, controls.debug, controls.matchinst,
+                             controls.prestige, controls.level,
                              controls.focus, controls.droprate }) do
             cb:SetChecked(cb._getter() and true or false)
         end

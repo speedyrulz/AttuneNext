@@ -450,20 +450,34 @@ local function CreateMainFrame()
     end
     UI.SetIconArt = SetIconArt
     UI.SetArtTrimmed = SetArtTrim
+    local function Kill(tex)
+        if not tex then return end
+        if tex.SetTexture then tex:SetTexture(nil) end
+        if tex.Hide then tex:Hide() end
+    end
+    local function StripRegion(r)
+        if r and not r.anxMine then
+            if r.SetTexture then r:SetTexture(nil) end
+            if r.SetText then r:SetText("") end
+            if r.Hide then r:Hide() end
+        end
+    end
+    local function StripChild(k)
+        if k and not k.anxMine then
+            if k.Hide then k:Hide() end
+            if k.SetAlpha then k:SetAlpha(0) end
+        end
+    end
     local function StripEngineSkin(b)
         -- the custom client decorates buttons with its own skin (an ornate
         -- normal texture appears on buttons that never set one). Clear and
         -- hide every engine-owned state texture; our own child textures are
-        -- untouched by this.
+        -- untouched by this. Runs per button per Render, so it must not
+        -- allocate: select() walks instead of the old {GetRegions()} tables.
         if b.SetNormalTexture then b:SetNormalTexture("") end
         if b.SetPushedTexture then b:SetPushedTexture("") end
         if b.SetDisabledTexture then b:SetDisabledTexture("") end
         if b.SetHighlightTexture then b:SetHighlightTexture("") end
-        local function Kill(tex)
-            if not tex then return end
-            if tex.SetTexture then tex:SetTexture(nil) end
-            if tex.Hide then tex:Hide() end
-        end
         if b.GetNormalTexture then Kill(b:GetNormalTexture()) end
         if b.GetPushedTexture then Kill(b:GetPushedTexture()) end
         if b.GetDisabledTexture then Kill(b:GetDisabledTexture()) end
@@ -471,28 +485,17 @@ local function CreateMainFrame()
         -- scorched earth: the client also ADDS its own child regions to
         -- buttons (the bracket box drawn from label-end to button-edge).
         -- Everything we create is tagged anxMine - hide everything else.
-        if b.GetRegions then
-            local regs = { b:GetRegions() }
-            for i = 1, #regs do
-                local r = regs[i]
-                if r and not r.anxMine then
-                    if r.SetTexture then r:SetTexture(nil) end
-                    if r.SetText then r:SetText("") end
-                    if r.Hide then r:Hide() end
-                end
+        if b.GetNumRegions and b.GetRegions then
+            for i = 1, b:GetNumRegions() do
+                StripRegion(select(i, b:GetRegions()))
             end
         end
         -- ...and the skinner's decor lives in child FRAMES (invisible to
         -- GetRegions). None of our custom buttons own child frames, so any
         -- child frame here is the client's - keep it hidden.
-        if b.GetChildren then
-            local kids = { b:GetChildren() }
-            for i = 1, #kids do
-                local k = kids[i]
-                if k and not k.anxMine then
-                    if k.Hide then k:Hide() end
-                    if k.SetAlpha then k:SetAlpha(0) end
-                end
+        if b.GetNumChildren and b.GetChildren then
+            for i = 1, b:GetNumChildren() do
+                StripChild(select(i, b:GetChildren()))
             end
         end
     end
@@ -752,6 +755,25 @@ local function CreateMainFrame()
     searchBox:SetScript("OnEditFocusLost", function(self)
         if (self:GetText() or "") == "" then searchPh:Show() end
     end)
+    -- Trailing debounce for re-renders while typing: the search builder walks
+    -- the whole item universe, so a render per keystroke was the addon's
+    -- single hottest path. One render fires ~0.25s after the last keystroke.
+    local function SearchRenderSoon()
+        UI._searchDeadline = GetTime() + 0.25
+        if UI._searchWaiting then return end
+        UI._searchWaiting = true
+        local function fire()
+            local remain = (UI._searchDeadline or 0) - GetTime()
+            if remain > 0.02 then
+                ANx.After(remain, fire)
+                return
+            end
+            UI._searchWaiting = nil
+            local cur = UI.Current()
+            if cur and cur.type == "search" then UI.Render() end
+        end
+        ANx.After(0.25, fire)
+    end
     searchBox:SetScript("OnTextChanged", function(self)
         local txt = self:GetText() or ""
         if txt == "" then searchPh:Show() else searchPh:Hide() end
@@ -760,9 +782,9 @@ local function CreateMainFrame()
         local cur = UI.Current()
         if txt ~= "" then
             if not cur or cur.type ~= "search" then
-                UI.Push({ type = "search" })
+                UI.Push({ type = "search" })   -- entering search renders once
             else
-                UI.Render()
+                SearchRenderSoon()
             end
         else
             if cur and cur.type == "search" then UI.Pop() else UI.Render() end
@@ -1143,7 +1165,8 @@ local function CreateMainFrame()
     scroll:SetPoint("TOPLEFT", CX + 16, -154)
     scroll:SetPoint("BOTTOMRIGHT", -36, 38)
     scroll:SetScript("OnVerticalScroll", function(self, offset)
-        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.Render)
+        -- repaint only - never rebuild the whole view per scroll notch
+        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, UI.PaintVisibleRows)
     end)
     f.scroll = scroll
 
@@ -1723,6 +1746,12 @@ local function CreateMainFrame()
     end
 
     tinsert(UISpecialFrames, "AttuneNextFrame")
+    f:SetScript("OnHide", function()
+        -- release the last view's row descriptors (formatted strings + one
+        -- onClick closure per row): they used to stay referenced while the
+        -- window was closed; the next Show renders fresh anyway
+        if UI.ClearRows then UI.ClearRows() end
+    end)
     f:Hide()
     if UI.ApplySkin then
         UI.frame = f          -- ApplySkin needs the handle during the build
@@ -1742,6 +1771,22 @@ end
 
 local function ResetRows()
     for i = #displayRows, 1, -1 do displayRows[i] = nil end
+end
+
+-- public wrapper for the main frame's OnHide (declared before these locals)
+function UI.ClearRows()
+    ResetRows()
+end
+
+-- Unskinned layout: SetIconArt returns false WITHOUT touching the texture,
+-- so recommendation cards must paint a plain fallback or they keep showing
+-- the previous recommendation's icon (stale art when an item pick switches
+-- to a run pick).
+function UI.SetRecIcon(icon, artKey, size, fallback)
+    if UI.SetIconArt and UI.SetIconArt(icon, artKey, size) then return end
+    if ANx.ClearArtCoords then ANx.ClearArtCoords(icon) end
+    icon:SetTexture(fallback or "Interface\\Icons\\INV_Misc_QuestionMark")
+    icon:SetWidth(size); icon:SetHeight(size)
 end
 
 -- Sortable node rows: builders collect via AddNodeRow, then FlushNodeRows
@@ -2677,9 +2722,9 @@ builders["quests"] = function(view)
                 prefix = "|cff00ff00[done] |r"
             end
             local qloc = { zoneName = z.name }
-            local ge = ANx.QuestGivers and ANx.QuestGivers[q.id]
-            if ge then qloc = { zoneName = ANx.QuestZoneNames and ANx.QuestZoneNames[ge[1]] or z.name,
-                x = ge[2] / 10, y = ge[3] / 10 } end
+            local gz, gx, gy = ANx.QuestGiver(q.id)
+            if gz then qloc = { zoneName = ANx.QuestZoneNames and ANx.QuestZoneNames[gz] or z.name,
+                x = gx / 10, y = gy / 10 } end
             AddNodeRow(q.name, st, {
                 text = prefix .. q.name .. (hasArrow and "  |cff33ff99>|r" or ""),
                 sub = #q.items .. " attunable reward(s)"
@@ -2751,9 +2796,9 @@ builders["vendors"] = function(view)
             .. (ANx.db.affordableOnly and ":aff" or ""))
         local hasLoc = ANx.HasVendorLoc and ANx.HasVendorLoc(v.id)
         local vloc = { zoneName = z.name }
-        local vle = v.id and ANx.VendorLocs and ANx.VendorLocs[v.id]
-        if vle then vloc = { zoneName = ANx.VendorZoneNames and ANx.VendorZoneNames[vle[1]] or z.name,
-            x = vle[2] / 10, y = vle[3] / 10 } end
+        local vz, vx, vy = ANx.VendorLoc(v.id)
+        if vz then vloc = { zoneName = ANx.VendorZoneNames and ANx.VendorZoneNames[vz] or z.name,
+            x = vx / 10, y = vy / 10 } end
         AddNodeRow(v.name, st, {
             text = v.name .. (hasLoc and "  |cff33ff99>|r" or ""),
             sub = z.name .. (hasLoc and "  |cff888888- click: waypoint arrow + items|r" or ""),
@@ -2925,11 +2970,7 @@ builders["options"] = function(view)
         text = "Reset all filters",
         sub = "All filters and sorting back to defaults.",
         onClick = function()
-            ANx.db.scope = "char"; ANx.db.faction = "both"; ANx.db.forge = 1
-            ANx.db.zoneExclusive = false; ANx.db.stockFilter = "all"
-            ANx.db.vendorFilter = "all"; ANx.db.raresOnly = false; ANx.db.sort = {}
-            ANx.db.questClass = "mine"; ANx.db.classFilter = "all"
-            Engine.InvalidateStats()
+            ANx.ResetFilters()
             ANx.Print("Filters reset to defaults.")
             UI.Render()
         end,
@@ -3138,9 +3179,13 @@ builders["items"] = function(view)
     -- page sort (default "chance" order comes pre-sorted from the engine)
     local sortMode = CurrentSort(view)
     if sortMode == "name" then
-        table.sort(rows, function(a, b)
-            return (ANx.GetItemDisplay(a.id) or ""):lower() < (ANx.GetItemDisplay(b.id) or ""):lower()
-        end)
+        -- precompute the key: the comparator ran GetItemDisplay + :lower()
+        -- per COMPARISON (O(n log n) lookups and string churn per render,
+        -- and server cache-requests from inside table.sort for uncached ids)
+        for _, r in ipairs(rows) do
+            r._sName = (ANx.GetItemName(r.id) or ""):lower()
+        end
+        table.sort(rows, function(a, b) return a._sName < b._sName end)
     elseif sortMode == "progress" then
         table.sort(rows, function(a, b)
             local pa = a.attuned and 101 or a.progress
@@ -3197,7 +3242,7 @@ builders["items"] = function(view)
             itemId = r.id,
             onClick = function(selfBtn)
                 if IsShiftKeyDown() then
-                    local _, l = ANx.GetItemDisplay(r.id)
+                    local l = ANx.GetItemLink(r.id)
                     if l then ChatEdit_InsertLink(l) end
                 elseif UI.selectedItem == r.id then
                     UI.Push({ type = "sources", itemId = r.id })  -- again = full page
@@ -3291,7 +3336,7 @@ builders["sources"] = function(view)
         itemId = itemId,
         onClick = function()
             if IsShiftKeyDown() then
-                local _, l = ANx.GetItemDisplay(itemId)
+                local l = ANx.GetItemLink(itemId)
                 if l then ChatEdit_InsertLink(l) end
             end
         end,
@@ -3541,10 +3586,13 @@ builders["search"] = function(view)
     local respectItems = ANx.db.searchFilters ~= false
     local matches, hidden = {}, 0
     for _, id in ipairs(universe) do
-        local name = ANx.GetItemDisplay(id)
+        -- GetItemName never queries the server: unresolved items simply don't
+        -- match (the old per-id GetItemDisplay call re-requested every
+        -- uncached item from the server on every render of this view)
+        local name = ANx.GetItemName(id)
         if name and name:lower():find(q, 1, true) then
             if (not respectItems) or (Engine.Eligible(id) and ANx.ForgeAllowed(id)) then
-                matches[#matches + 1] = { id = id, name = name }
+                matches[#matches + 1] = { id = id, name = name, lname = name:lower() }
             else
                 hidden = hidden + 1
             end
@@ -3559,10 +3607,10 @@ builders["search"] = function(view)
         end
         table.sort(matches, function(a, b)
             if a._d ~= b._d then return a._d < b._d end
-            return a.name:lower() < b.name:lower()
+            return a.lname < b.lname
         end)
     else
-        table.sort(matches, function(a, b) return a.name:lower() < b.name:lower() end)
+        table.sort(matches, function(a, b) return a.lname < b.lname end)
     end
 
     local CAP = 60
@@ -3639,7 +3687,10 @@ local function ViewTitle(view)
     elseif t == "events" then return "Events & Holidays  -  Which Event?"
     elseif t == "whatsleft" then return "What's Left?  -  totals only"
     elseif t == "whatsleftScope" then
-        return (view.scope == "char" and "This Character" or "Account") .. "  -  remaining by category"
+        -- derive from the live scope chip: no Push ever set view.scope, so
+        -- the old title claimed "Account" even in Character scope
+        return ((ANx.db and ANx.db.scope) ~= "account" and "This Character" or "Account")
+            .. "  -  remaining by category"
     elseif t == "whatsleftMats" then
         return "Crafting  -  what's left"
     elseif t == "whatsleftMatList" then
@@ -3662,6 +3713,69 @@ end
 -- ---------------------------------------------------------------------
 -- Render
 -- ---------------------------------------------------------------------
+-- Constants + helpers hoisted out of Render: it used to rebuild these
+-- tables and closures on every call, and Render fires on every refresh.
+local NAV_SHORT = {
+    root = "Home", browse = "Browse", home = "Expansions",
+    contentTypes = "Content Types",
+    whatsleft = "What's Left", whatsleftScope = "Breakdown",
+    whatsleftMats = "Crafting", whatsleftMatList = "Materials",
+    whatsleftCur = "Currency", favorites = "Favorites", goals = "Goals",
+    options = "Options", anextConfig = "AttuneNext Options", search = "Search",
+    sources = "Item", events = "Events",
+}
+local function CrumbLabel(v)
+    local t = v.type
+    if NAV_SHORT[t] then return NAV_SHORT[t] end
+    if t == "content" then return ANx.EXP_SHORT[v.exp] or "?" end
+    if t == "contentExp" then return CONTENT_LABELS[v.content] or "Content" end
+    if t == "instances" then
+        return (ANx.EXP_SHORT[v.exp] or "?") .. " " .. (v.kind == "D" and "Dungeons" or "Raids")
+    end
+    if t == "zones" then
+        return (v.mode == "Q" and "Quests") or (v.mode == "W" and "World Drops") or "Zones"
+    end
+    if t == "quests" or t == "currencies" then
+        return (v.zoneEntry and v.zoneEntry.name) or "Zone"
+    end
+    if t == "vendors" then return v.currency or "Vendors" end
+    if t == "profs" then return "Crafting" end
+    if t == "items" then return v.title or "Items" end
+    return ViewTitle(v)
+end
+local NAV_OF = {
+    root = "home", browse = "browse", home = "browse", content = "browse",
+    contentTypes = "browse",
+    contentExp = "browse", instances = "browse", zones = "browse", quests = "browse",
+    currencies = "browse", vendors = "browse", profs = "browse", events = "browse",
+    items = "browse", sources = "browse", search = "browse",
+    anextConfig = "options", options = "options",
+    whatsleft = "whatsleft", whatsleftScope = "whatsleft", whatsleftMats = "whatsleft",
+    whatsleftMatList = "whatsleft", whatsleftCur = "whatsleft",
+    favorites = "favorites", goals = "goals",
+}
+local function SetChip(b, iconKey, text)
+    if b.anxIconKey ~= iconKey then
+        b.anxIconKey = iconKey
+        if b.anxChipIcon then
+            if UI.SetIconArt and UI.SetIconArt(b.anxChipIcon, iconKey, 18) then
+                b.anxChipIcon:Show()
+            else
+                b.anxChipIcon:Hide()
+            end
+        end
+    end
+    if b.anxLabel then b.anxLabel:SetText(text) end
+end
+local FIND_ICON = { items = "attunement", vendors = "vendors",
+    dungeons = "dungeons", raids = "raids", profs = "crafting", quests = "quests" }
+local FIND_LABELS = { items = "Attunables", vendors = "Vendors",
+    dungeons = "Dungeons", raids = "Raids", profs = "Professions", quests = "Quests" }
+-- long labels for the main window's currency CHIP (the Browse window's
+-- narrow filter buttons use the short VENDOR_FILTER_LABELS from the top)
+local VENDOR_CHIP_LABELS = { all = "All currencies", gold = "Gold vendors",
+    points = "Honor & Arena", emblem = "Emblem vendors", token = "Token vendors" }
+
 function UI.Render()
     EnsureEngine()
     -- a standalone simple window can own the navigation stack
@@ -3715,35 +3829,6 @@ function UI.Render()
     if builder then builder(view) end
 
     UI.Title = ViewTitle
-    -- breadcrumb: short path through the stack, current segment in gold
-    local NAV_SHORT = {
-        root = "Home", browse = "Browse", home = "Expansions",
-        contentTypes = "Content Types",
-        whatsleft = "What's Left", whatsleftScope = "Breakdown",
-        whatsleftMats = "Crafting", whatsleftMatList = "Materials",
-        whatsleftCur = "Currency", favorites = "Favorites", goals = "Goals",
-        options = "Options", anextConfig = "AttuneNext Options", search = "Search",
-        sources = "Item", events = "Events",
-    }
-    local function CrumbLabel(v)
-        local t = v.type
-        if NAV_SHORT[t] then return NAV_SHORT[t] end
-        if t == "content" then return ANx.EXP_SHORT[v.exp] or "?" end
-        if t == "contentExp" then return CONTENT_LABELS[v.content] or "Content" end
-        if t == "instances" then
-            return (ANx.EXP_SHORT[v.exp] or "?") .. " " .. (v.kind == "D" and "Dungeons" or "Raids")
-        end
-        if t == "zones" then
-            return (v.mode == "Q" and "Quests") or (v.mode == "W" and "World Drops") or "Zones"
-        end
-        if t == "quests" or t == "currencies" then
-            return (v.zoneEntry and v.zoneEntry.name) or "Zone"
-        end
-        if t == "vendors" then return v.currency or "Vendors" end
-        if t == "profs" then return "Crafting" end
-        if t == "items" then return v.title or "Items" end
-        return ViewTitle(v)
-    end
     do
         local parts, idxs = {}, {}
         for i, v in ipairs(UI.stack) do
@@ -3812,17 +3897,6 @@ function UI.Render()
     end
 
     -- sidebar: highlight the active section
-    local NAV_OF = {
-        root = "home", browse = "browse", home = "browse", content = "browse",
-        contentTypes = "browse",
-        contentExp = "browse", instances = "browse", zones = "browse", quests = "browse",
-        currencies = "browse", vendors = "browse", profs = "browse", events = "browse",
-        items = "browse", sources = "browse", search = "browse",
-        anextConfig = "options", options = "options",
-        whatsleft = "whatsleft", whatsleftScope = "whatsleft", whatsleftMats = "whatsleft",
-        whatsleftMatList = "whatsleft", whatsleftCur = "whatsleft",
-        favorites = "favorites", goals = "goals",
-    }
     local activeNav = NAV_OF[view.type] or "browse"
     for key, nb in pairs(f.navButtons or {}) do
         local active = (key == activeNav)
@@ -3851,29 +3925,11 @@ function UI.Render()
         f.favBtn:Hide()
     end
     -- ---------- chips: value-first labels, one color per filter ----------
-    local function SetChip(b, iconKey, text)
-        if b.anxIconKey ~= iconKey then
-            b.anxIconKey = iconKey
-            if b.anxChipIcon then
-                if UI.SetIconArt and UI.SetIconArt(b.anxChipIcon, iconKey, 18) then
-                    b.anxChipIcon:Show()
-                else
-                    b.anxChipIcon:Hide()
-                end
-            end
-        end
-        if b.anxLabel then b.anxLabel:SetText(text) end
-    end
-
     -- Find/Filters by the search bar: sidebar-style icon + warm label,
     -- the Find icon follows the search type
     local sType = ANx.db.searchType or "items"
-    local FIND_ICON = { items = "attunement", vendors = "vendors",
-        dungeons = "dungeons", raids = "raids", profs = "crafting", quests = "quests" }
     SetChip(f.findBtn, FIND_ICON[sType] or "attunement",
-        "|cffe3c98fFind: " .. (({ items = "Attunables", vendors = "Vendors",
-        dungeons = "Dungeons", raids = "Raids", profs = "Professions",
-        quests = "Quests" })[sType] or "?") .. "|r")
+        "|cffe3c98fFind: " .. (FIND_LABELS[sType] or "?") .. "|r")
     SetChip(f.searchFiltersBtn, "filter", (ANx.db.searchFilters ~= false)
         and "|cffe3c98fFilters: |cff33ff99On|r" or "|cffe3c98fFilters: |cffff8000Off|r")
 
@@ -3937,9 +3993,7 @@ function UI.Render()
     end
     if ViewHasVendorFilter(view) then
         local vf = ANx.db.vendorFilter or "all"
-        local VC = { all = "All currencies", gold = "Gold vendors",
-            points = "Honor & Arena", emblem = "Emblem vendors", token = "Token vendors" }
-        SetChip(f.filterBtn, "currency", "|cffffd24a" .. (VC[vf] or "?") .. "|r")
+        SetChip(f.filterBtn, "currency", "|cffffd24a" .. (VENDOR_CHIP_LABELS[vf] or "?") .. "|r")
         f.filterBtn:Show()
     else
         f.filterBtn:Hide()
@@ -3981,6 +4035,16 @@ function UI.Render()
         f.status:SetText("")
     end
 
+    UI.PaintVisibleRows()
+end
+
+-- Paint the visible rows from the already-built displayRows. The scroll
+-- handler calls ONLY this: scrolling repaints the dozen visible row buttons;
+-- it never re-runs the view builder (UI.Render does the full rebuild, which
+-- used to run per wheel notch - an O(list) walk + re-sort per scroll step).
+function UI.PaintVisibleRows()
+    local f = UI.frame
+    if not f or not f:IsShown() then return end
     local total = #displayRows
     FauxScrollFrame_Update(f.scroll, total, VISIBLE_ROWS, ROW_H)
     local offset = FauxScrollFrame_GetOffset(f.scroll)
@@ -4155,7 +4219,7 @@ function UI.UpdateHomePanel()
             have = true
             if r.zone then
                 rec.anxIconKey = EXP_ART[r.zone.exp or 1]
-                UI.SetIconArt(rec.icon, rec.anxIconKey, 68)
+                UI.SetRecIcon(rec.icon, rec.anxIconKey, 68, "Interface\\Icons\\INV_Misc_Map02")
                 rec.title:SetText("|cffffd100" .. r.zone.name .. "|r")
                 rec.line1:SetText("|cffbfae86Zone sweep|r  -  quests + world drops")
                 rec.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d items left",
@@ -4163,7 +4227,7 @@ function UI.UpdateHomePanel()
             else
                 local thumb = "thumb_" .. ArtSlug(r.inst.name)
                 rec.anxIconKey = (ANx.Art and ANx.Art[thumb]) and thumb or "dungeons"
-                UI.SetIconArt(rec.icon, rec.anxIconKey, 68)
+                UI.SetRecIcon(rec.icon, rec.anxIconKey, 68, "Interface\\Icons\\INV_Misc_Key_10")
                 rec.title:SetText("|cffffd100" .. r.inst.name .. RunLabel(r.d) .. "|r")
                 rec.line1:SetText("|cffbfae86Best run|r  -  "
                     .. string.format("|cff00ff88~%.1f per clear|r  |cff888888(%s)|r",
@@ -4730,17 +4794,23 @@ function UI.UpdateSidePane()
             state = "|cffffff00" .. math.floor(prog + 0.5) .. "% attuned|r"
         end
         local extra = ""
-        if not ANx.CanCharAttune(id) and ANx.AltListString then
-            local alts = ANx.AltListString(id)
-            if alts and alts ~= "" then extra = "  |cff888888(" .. alts .. ")|r" end
+        if not ANx.CanCharAttune(id) and ANx.AltListString and ANx.AltsWhoCanAttune then
+            local alts = ANx.AltsWhoCanAttune(id)
+            if #alts > 0 then extra = "  |cff888888(" .. ANx.AltListString(alts) .. ")|r" end
         end
         it.line3:SetText(state .. extra)
-        it.srcBtn:SetScript("OnClick", function()
-            UI.Push({ type = "sources", itemId = id })
-        end)
-        it.arrowBtn:SetScript("OnClick", function()
-            if ANx.ArrowToItem then ANx.ArrowToItem(id) end
-        end)
+        -- wire once; read the current selection from a field (a fresh
+        -- closure per button per render was pure allocation churn)
+        it.anxItemId = id
+        if not it.anxWired then
+            it.anxWired = true
+            it.srcBtn:SetScript("OnClick", function()
+                if it.anxItemId then UI.Push({ type = "sources", itemId = it.anxItemId }) end
+            end)
+            it.arrowBtn:SetScript("OnClick", function()
+                if it.anxItemId and ANx.ArrowToItem then ANx.ArrowToItem(it.anxItemId) end
+            end)
+        end
         it:Show()
         -- two cards: split the column so the pair fills it (12px gap)
         local total = (sp.anxH or 500) - 12
@@ -4776,12 +4846,13 @@ function UI.UpdateSidePane()
     local trackGoal
     if r then
         if r.zone then
-            UI.SetIconArt(rc.icon, EXP_ART[r.zone.exp or 1], 48)
+            UI.SetRecIcon(rc.icon, EXP_ART[r.zone.exp or 1], 48, "Interface\\Icons\\INV_Misc_Map02")
             UI.FitText(rc.name, "|cffffd100" .. r.zone.name .. "|r", (SIDE_W - 116) * 2)
             rc.line1:SetText("|cffbfae86Zone sweep|r")
         else
             local thumb = "thumb_" .. ArtSlug(r.inst.name)
-            UI.SetIconArt(rc.icon, (ANx.Art and ANx.Art[thumb]) and thumb or "dungeons", 48)
+            UI.SetRecIcon(rc.icon, (ANx.Art and ANx.Art[thumb]) and thumb or "dungeons", 48,
+                "Interface\\Icons\\INV_Misc_Key_10")
             UI.FitText(rc.name, "|cffffd100" .. r.inst.name .. RunLabel(r.d) .. "|r", (SIDE_W - 116) * 2)
             rc.line1:SetText("|cffbfae86Best run here|r")
             trackGoal = { kind = "inst", map = r.inst.map, name = r.inst.name,
@@ -4849,10 +4920,14 @@ function UI.UpdateSidePane()
         local tracked = UI.GoalTracked and UI.GoalTracked(goal)
         rc.trackBtn.anxLabel:SetText(tracked and "|cff33ff99Tracked - remove|r"
             or "|cffe3c98fTrack as a goal|r")
-        rc.trackBtn:SetScript("OnClick", function()
-            if UI.ToggleGoal then UI.ToggleGoal(goal) end
-            UI.Render()
-        end)
+        rc.trackBtn.anxGoal = goal
+        if not rc.trackBtn.anxWired then
+            rc.trackBtn.anxWired = true
+            rc.trackBtn:SetScript("OnClick", function(self)
+                if self.anxGoal and UI.ToggleGoal then UI.ToggleGoal(self.anxGoal) end
+                UI.Render()
+            end)
+        end
         rc.trackBtn:Show()
     else
         rc.trackBtn:Hide()

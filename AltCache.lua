@@ -4,17 +4,21 @@
 -- (account-wide). Item detail pages and tooltips can then say
 -- "not for this character - Roguey (Rogue) can attune it".
 -- The snapshot refreshes every login, so class/level changes stay current.
+--
+-- Storage: rec.items is ONE ",id,id,...," string per character; membership
+-- is a plain substring find. The old per-alt id ARRAY (thousands of numbers
+-- resident + serialized per alt) plus the runtime [id]=true sets built from
+-- it held up to ~1.5 MB on multi-alt accounts - and the sets could never be
+-- collected (weak-keyed by rec tables the DB itself holds strongly).
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 
-local CHUNK = 1500   -- helper calls per step; spread over the timer
+local CHUNK = 1500     -- helper calls per step; spread over the timer
+local KEEP_DAYS = 60   -- drop snapshots of characters not seen for this long
 
 local function CharName()
     return (_G.UnitName and _G.UnitName("player")) or "Unknown"
 end
-
--- runtime membership sets per cached record (weak keys: never saved)
-local setCache = setmetatable({}, { __mode = "k" })
 
 -- ---------------------------------------------------------------------
 -- Login snapshot of what THIS character can attune
@@ -29,6 +33,29 @@ function ANx.SnapshotAltCan()
         return
     end
     snapshotting = true
+
+    -- one cheap pass per login: migrate array-form records to the packed
+    -- string, stamp un-stamped records (starts their clock), and prune
+    -- characters not seen for KEEP_DAYS days (deleted/renamed alts used to
+    -- keep their snapshot forever)
+    ANx.db.altCan = ANx.db.altCan or {}
+    local now = (_G.time and _G.time()) or 0
+    for cname, rec in pairs(ANx.db.altCan) do
+        if type(rec) ~= "table" then
+            ANx.db.altCan[cname] = nil
+        else
+            if type(rec.items) == "table" then
+                rec.items = "," .. table.concat(rec.items, ",") .. ","
+            end
+            if now > 0 then
+                rec.seenAt = rec.seenAt or now
+                if (now - rec.seenAt) > KEEP_DAYS * 86400 then
+                    ANx.db.altCan[cname] = nil
+                end
+            end
+        end
+    end
+
     local className, classFile
     if _G.UnitClass then
         local ln, f = _G.UnitClass("player")
@@ -38,15 +65,16 @@ function ANx.SnapshotAltCan()
         class = classFile,
         className = className,
         level = (_G.UnitLevel and _G.UnitLevel("player")) or 0,
-        items = {},
+        seenAt = (now > 0) and now or nil,
     }
+    local ids = {}
     local i = 1
     local function step()
         local n = 0
         while i <= #universe and n < CHUNK do
             local id = universe[i]
             if ANx.CanCharAttune(id) then
-                rec.items[#rec.items + 1] = id
+                ids[#ids + 1] = id
             end
             i = i + 1
             n = n + 1
@@ -54,11 +82,11 @@ function ANx.SnapshotAltCan()
         if i <= #universe then
             ANx.After(0.1, step)
         else
-            ANx.db.altCan = ANx.db.altCan or {}
+            rec.items = "," .. table.concat(ids, ",") .. ","
             ANx.db.altCan[CharName()] = rec
             snapshotting = false
             ANx.DebugMsg("alt snapshot: " .. CharName() .. " can attune "
-                .. #rec.items .. " of " .. #universe .. " items")
+                .. #ids .. " of " .. #universe .. " items")
         end
     end
     step()
@@ -72,15 +100,20 @@ end
 function ANx.AltsWhoCanAttune(itemId)
     local me = CharName()
     local out = {}
+    local needle = "," .. itemId .. ","
     for cname, rec in pairs((ANx.db and ANx.db.altCan) or {}) do
         if cname ~= me and type(rec) == "table" and rec.items then
-            local set = setCache[rec]
-            if not set then
-                set = {}
-                for _, id in ipairs(rec.items) do set[id] = true end
-                setCache[rec] = set
+            local items = rec.items
+            local hit = false
+            if type(items) == "string" then
+                hit = items:find(needle, 1, true) ~= nil
+            else
+                -- pre-migration array form (until this alt's next snapshot)
+                for _, id in ipairs(items) do
+                    if id == itemId then hit = true break end
+                end
             end
-            if set[itemId] then
+            if hit then
                 out[#out + 1] = { name = cname, className = rec.className or rec.class or "?" }
             end
         end

@@ -12,12 +12,21 @@ local function LinkItemId(link)
     return link and tonumber(link:match("item:(%d+)")) or nil
 end
 
+-- flat {id,count,id,count,...} arrays: element-wise equal?
+local function SameReagents(a, b)
+    if not a or #a ~= #b then return false end
+    for i = 1, #b do
+        if a[i] ~= b[i] then return false end
+    end
+    return true
+end
+
 function ANx.ScanTradeSkill()
     if not (ANx.db and _G.GetNumTradeSkills) then return end
     local profName = _G.GetTradeSkillLine and _G.GetTradeSkillLine()
     if not profName or profName == "UNKNOWN" then return end
     local n = _G.GetNumTradeSkills() or 0
-    local stored = 0
+    local seen, changed = 0, 0
     for i = 1, n do
         local _, skillType = _G.GetTradeSkillInfo(i)
         if skillType and skillType ~= "header" then
@@ -35,25 +44,34 @@ function ANx.ScanTradeSkill()
                     end
                 end
                 if #rg > 0 then
-                    ANx.db.reagents[itemId] = rg
+                    seen = seen + 1
+                    -- keep the stored table when identical: every craft
+                    -- completion fires TRADE_SKILL_UPDATE, and a batch smelt
+                    -- used to rebuild hundreds of identical tables plus a
+                    -- full stats+UI refresh every half second
+                    if not SameReagents(ANx.db.reagents[itemId], rg) then
+                        ANx.db.reagents[itemId] = rg
+                        changed = changed + 1
+                    end
                     -- items produced per craft (a smelt can yield 2 bars);
                     -- store the guaranteed minimum when it's more than one
                     local minMade = _G.GetTradeSkillNumMade and _G.GetTradeSkillNumMade(i)
-                    if minMade and minMade > 1 then
-                        ANx.db.reagentOutput[itemId] = math.floor(minMade)
-                    else
-                        ANx.db.reagentOutput[itemId] = nil
+                    local made = (minMade and minMade > 1) and math.floor(minMade) or nil
+                    if ANx.db.reagentOutput[itemId] ~= made then
+                        ANx.db.reagentOutput[itemId] = made
+                        changed = changed + 1
                     end
-                    stored = stored + 1
                 end
             end
         end
     end
-    if stored > 0 then
+    if seen > 0 then
         ANx.db.reagentProfs = ANx.db.reagentProfs or {}
         ANx.db.reagentProfs[profName] = true
-        ANx.DebugMsg("tradeskill scan (" .. profName .. "): reagents stored for "
-            .. stored .. " recipes")
+    end
+    if changed > 0 then
+        ANx.DebugMsg("tradeskill scan (" .. profName .. "): " .. changed
+            .. " recipe change(s) stored")
         if ANx.Engine and ANx.Engine.InvalidateRemaining then ANx.Engine.InvalidateRemaining() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end

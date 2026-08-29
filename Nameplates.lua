@@ -52,6 +52,10 @@ local entryCache  = {}      -- [entryId] = info + at
 local plates      = {}      -- [frame] = true, every plate ever seen
 local activeGlows = {}      -- [frame] = true, only those currently marked
 local lastKids    = 0
+local indexGen    = 1       -- bumped whenever needByName/learned change, so
+                            -- the 0.2s plate poll can skip plates whose name
+                            -- AND index are unchanged (no gsub chain, no
+                            -- redundant SetText per plate per tick)
 
 local staging, zoneSeen, zoneQueue, zoneAt, zoneBuilding
 local rebuildQueued, builtZone
@@ -285,6 +289,13 @@ local function PumpZoneIndex()
                 learned[key] = nil
             end
         end
+        -- prune expired exact-entry scans while we're here: they rescan on
+        -- demand, and the cache otherwise only ever grew within a session
+        local now = GetTime()
+        for id, e in pairs(entryCache) do
+            if e.at and (now - e.at) > ENTRY_TTL then entryCache[id] = nil end
+        end
+        indexGen = indexGen + 1
         ANx.DebugMsg("plate index built")
         if NP.RefreshAllPlates then NP.RefreshAllPlates() end
     end
@@ -313,7 +324,21 @@ local function IsNameplate(frame)
         local ok, tex = pcall(region.GetTexture, region)
         if ok and tex == NAMEPLATE_BORDER then return true end
     end
-    return false
+    -- ElvUI / KuiNameplates blank the border texture on every plate they take
+    -- over (SetTexture("")/nil) - and they scan faster than our poll, so with
+    -- either loaded the texture check never matches and the whole feature was
+    -- silently dead. Structural fallback per the 3.3.5 nameplate reference:
+    -- an anonymous frame with 11+ regions whose regions 7/8 are FontStrings
+    -- (name/level) and exactly two StatusBar children (health/cast bar).
+    if not (frame.GetNumRegions and frame:GetNumRegions() >= 11) then return false end
+    local nameFS, levelFS = select(7, frame:GetRegions())
+    if not (nameFS and nameFS.GetObjectType and nameFS:GetObjectType() == "FontString"
+        and levelFS and levelFS.GetObjectType and levelFS:GetObjectType() == "FontString") then
+        return false
+    end
+    local hb, cb = frame:GetChildren()
+    return (hb and hb.GetObjectType and hb:GetObjectType() == "StatusBar"
+        and cb and cb.GetObjectType and cb:GetObjectType() == "StatusBar") == true
 end
 
 local function PlateNameString(frame)
@@ -343,21 +368,35 @@ end
 -- The exact entry scan is authoritative for DROPS (kill loot enumerates by
 -- entry) but blind to vendor stock. Merge: take the scan's drops, keep the
 -- zone index's vendor knowledge, and only record "nothing" when both agree.
+-- Returns true when the stored answer actually CHANGED - callers only
+-- refresh the plates on a real change (mousing over an already-known pack
+-- used to trigger a full refresh pass per unit crossed).
 local function Learn(name, info)
     local key = NP.NameKey(name)
-    if not key then return end
+    if not key then return false end
     local zone = needByName[key]
     local drop = (info and info.drop) or 0
     local vend = math.max((info and info.vend) or 0,
                           (info and info.vendExact) and 0 or (zone and zone.vend) or 0)
     if drop + vend > 0 then
+        local old = learned[key]
+        if type(old) == "table" and old.drop == drop and old.vend == vend then
+            return false
+        end
         learned[key] = {
             drop = drop, vend = vend, count = drop + vend,
             best = (info and info.best) or (zone and zone.best),
         }
     else
-        learned[key] = false
+        -- NPC names are not unique per entry id: an exact "nothing" from ONE
+        -- entry must not blank the marks of same-named entries the zone index
+        -- knows still drop something - defer to the index for those
+        local newVal = (zone and (zone.drop or 0) > 0) and nil or false
+        if learned[key] == newVal then return false end
+        learned[key] = newVal
     end
+    indexGen = indexGen + 1
+    return true
 end
 
 -- Exact vendor answer from an open merchant window: enumerate the stock and
@@ -386,9 +425,9 @@ function NP.LearnMerchant()
         if not stockIds[id] then drop = drop + 1 end
     end
     local name = UnitName("npc")
-    Learn(name, { drop = drop, vend = vend,
+    local changed = Learn(name, { drop = drop, vend = vend,
                   vendExact = true, count = drop + vend, best = base.best })
-    if NP.RefreshAllPlates then NP.RefreshAllPlates() end
+    if changed and NP.RefreshAllPlates then NP.RefreshAllPlates() end
 
     -- would mark, but there is no plate frame carrying this name: friendly
     -- nameplates are almost certainly switched off - say so once
@@ -416,6 +455,19 @@ end
 
 local UpdatePlate   -- forward declaration, hooked as OnShow
 
+-- plates are pooled: the same frame returns as a different unit later, so a
+-- recycle must both tear the mark down and drop the cached name/generation
+local function PlateOnHide(f)
+    HidePlateMark(f)
+    f.anxGen, f.anxRawName, f.anxKey = nil, nil, nil
+end
+
+local function PlateOnShow(f)
+    -- direct call, no closure/timer per recycle: a recycle-blank name just
+    -- early-returns and the 0.2s poll repairs it a tick later
+    UpdatePlate(f)
+end
+
 local function EnsurePlateMark(frame)
     if frame.anxGlow then return end
     -- resolve the client's name FontString before adding ours, or the scan
@@ -441,10 +493,8 @@ local function EnsurePlateMark(frame)
 
     -- plates are pooled: the same frame returns as a different unit
     if frame.HookScript then
-        frame:HookScript("OnHide", HidePlateMark)
-        frame:HookScript("OnShow", function(f)
-            ANx.After(0.05, function() UpdatePlate(f) end)
-        end)
+        frame:HookScript("OnHide", PlateOnHide)
+        frame:HookScript("OnShow", PlateOnShow)
     end
 end
 
@@ -461,7 +511,24 @@ function UpdatePlate(frame)
     -- recycled; treat that as "no change" rather than hiding
     if not name or name == "" then return end
 
-    local info = NP.LookupName(name)
+    -- cache the normalized key per frame and skip ALL work when neither the
+    -- plate's unit nor the index changed since the last pass: the old code
+    -- re-ran the gsub chain and re-set the tag for every plate every 0.2s
+    if frame.anxRawName ~= name then
+        frame.anxRawName = name
+        frame.anxKey = NP.NameKey(name)
+        frame.anxGen = nil
+    end
+    if frame.anxGen == indexGen then return end
+    frame.anxGen = indexGen
+
+    local key = frame.anxKey
+    local info
+    if key then
+        info = learned[key]
+        if info == nil then info = needByName[key]
+        elseif info == false then info = nil end
+    end
     if not info then
         HidePlateMark(frame)
         return
@@ -515,8 +582,11 @@ function NP.Inspect(unit)
     if not unit or not UnitExists(unit) or UnitIsPlayer(unit) then return nil end
     local info = NP.ScanEntry(NP.NpcID(UnitGUID(unit)))
     if info then
-        Learn(UnitName(unit), info)
-        RefreshAllPlates()
+        -- refresh only when the answer actually changed: re-mousing over an
+        -- already-known pack used to fire a full refresh pass per unit
+        if Learn(UnitName(unit), info) then
+            RefreshAllPlates()
+        end
     end
     return info
 end
@@ -525,16 +595,26 @@ end
 function NP.Invalidate()
     entryCache = {}
     learned = {}
+    indexGen = indexGen + 1
     RefreshAllPlates()
     QueueRebuild(0.5)
 end
 
+-- debounced: completions can burst (attuning a quest reward completes every
+-- reward of that quest at once)
+local attunePending = false
 function NP.OnAttune()
     if not NP.Enabled() then return end
-    entryCache = {}
-    learned = {}
-    RefreshAllPlates()
-    QueueRebuild(ATTUNE_WAIT)
+    if attunePending then return end
+    attunePending = true
+    ANx.After(1, function()
+        attunePending = false
+        entryCache = {}
+        learned = {}
+        indexGen = indexGen + 1
+        RefreshAllPlates()
+        QueueRebuild(ATTUNE_WAIT)
+    end)
 end
 
 -- normalise plate/source names the same way on both sides: trailing spaces
@@ -577,13 +657,20 @@ function NP.Init()
 
         -- every frame, but only over marked plates (usually a handful);
         -- stepping this on a timer is what makes a pulse look like stutter
-        if Cfg().pulse then
+        local pulseOn = Cfg().pulse
+        if pulseOn then
             pulse = (pulse + elapsed) % 6.2832
             local a = 0.42 + 0.22 * math.sin(pulse * 2.4)
             for frame in pairs(activeGlows) do
                 frame.anxGlow:SetAlpha(a)
             end
+        elseif NP._pulseWas then
+            -- pulse just switched off: settle every glow at the steady alpha
+            for frame in pairs(activeGlows) do
+                frame.anxGlow:SetAlpha(GLOW_STEADY)
+            end
         end
+        NP._pulseWas = pulseOn
     end)
 
     -- the index needs the server data, which is NOT ready at login: rebuild

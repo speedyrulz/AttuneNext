@@ -148,8 +148,12 @@ ANx.QuestItemStarts = {
 [24914]={4812,696,677,"The Lich King (drops the quest starter)"},
 }
 for qid, e in pairs(ANx.QuestItemStarts) do
-    if not ANx.QuestGivers[qid] then ANx.QuestGivers[qid] = e end
+    if not ANx.QuestGivers[qid] then
+        -- QuestGivers values are packed "zone:x10:y10:name" strings now
+        ANx.QuestGivers[qid] = e[1] .. ":" .. e[2] .. ":" .. e[3] .. ":" .. e[4]
+    end
 end
+ANx.QuestItemStarts = nil   -- merge-only temporary; let the GC take the table
 ANx.QuestItemStartNames = {
 [2]="Sharptalon's Claw",
 [23]="Ursangous's Paw",
@@ -293,8 +297,8 @@ ANx.QuestItemStartNames = {
 [24442]="Battle Plans Of The Kvaldir",
 [24914]="Personal Property",
 }
-if ANx.QuestNames then
-    for qid, n in pairs(ANx.QuestItemStartNames) do
-        if not ANx.QuestNames[qid] then ANx.QuestNames[qid] = n end
-    end
-end
+-- Quest names now live in packed blobs (Data_QuestGivers / ANx.QuestNameOf);
+-- this small table is its fallback for dropped-item starter quests, matching
+-- the old merge precedence (blob names win where both know the quest).
+ANx.QuestNamesExtra = ANx.QuestItemStartNames
+ANx.QuestItemStartNames = nil

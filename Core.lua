@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.5.1"
+ANx.VERSION = "3.6.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -224,8 +224,31 @@ local function ApplyDefaults(db, def)
             else
                 db[k] = v
             end
+        elseif type(v) == "table" and type(db[k]) == "table" then
+            -- recurse into EXISTING subtables too: keys added to nested
+            -- defaults (anext/plates/rec) in an upgrade used to stay nil
+            -- forever for anyone with an older SavedVariables
+            ApplyDefaults(db[k], v)
         end
     end
+end
+
+-- Every filter the chip row / lists honor, reset from the defaults table.
+-- ONE shared implementation: the two "reset filters" buttons each carried
+-- their own (different, both incomplete) key lists.
+local FILTER_RESET_KEYS = {
+    "scope", "faction", "forge", "zoneExclusive", "stockFilter", "vendorFilter",
+    "raresOnly", "questClass", "classFilter", "bindFilter", "accessories",
+    "difficulty", "raidSize", "affordableOnly",
+}
+function ANx.ResetFilters()
+    if not ANx.db then return end
+    for _, k in ipairs(FILTER_RESET_KEYS) do
+        ANx.db[k] = defaults[k]
+    end
+    ANx.db.sort = {}
+    ANx.InvalidatePlayerCurrency()
+    if ANx.Engine then ANx.Engine.InvalidateStats() end
 end
 
 -- ---------------------------------------------------------------------
@@ -241,15 +264,30 @@ timerFrame:SetScript("OnUpdate", function(self, elapsed)
         if now >= t.at then
             table.remove(timers, i)
             local ok, err = pcall(t.func)
-            if not ok then ANx.DebugMsg("timer error: " .. tostring(err)) end
+            if not ok then ANx.ReportError("timer error: " .. tostring(err)) end
         else
             i = i + 1
         end
     end
+    if #timers == 0 then self:Hide() end   -- OnUpdate only fires while shown
 end)
 
 function ANx.After(delay, func)
     table.insert(timers, { at = GetTime() + delay, func = func })
+    timerFrame:Show()
+end
+
+-- Deferred-callback errors used to vanish unless debug logging was on - the
+-- only symptom was "the list never refreshed". Say each distinct error once.
+local reportedErrors = {}
+function ANx.ReportError(msg)
+    msg = tostring(msg)
+    if not reportedErrors[msg] then
+        reportedErrors[msg] = true
+        ANx.Print("|cffff4040" .. msg .. "|r")
+    elseif ANx.debug then
+        ANx.DebugMsg(msg)
+    end
 end
 
 -- ---------------------------------------------------------------------
@@ -304,15 +342,148 @@ function ANx.StatsString(attuned, total)
 end
 
 -- ---------------------------------------------------------------------
+-- Packed data tables. Several Data_* tables ship as one sorted fixed-width
+-- hex string instead of a Lua hash: a [id]=value hash node costs ~28 bytes
+-- on the 32-bit client, a packed record 5-6 chars. Records are 4 hex chars
+-- of id (all packed ids are < 65,536) followed by `vw` hex chars of value
+-- (vw = 0/nil: a plain membership set). Lookup binary-searches the string;
+-- ~13 probes of a few bytes each, so wrap call sites in a cache only when
+-- they are genuinely hot.
+-- ---------------------------------------------------------------------
+-- hex character -> value, indexed by byte code (no string allocation)
+local HEXV = {}
+for i = 0, 9 do HEXV[48 + i] = i end                       -- '0'..'9'
+for i = 0, 5 do HEXV[65 + i] = 10 + i; HEXV[97 + i] = 10 + i end  -- A-F / a-f
+
+local strbyte, mfloor = string.byte, math.floor
+
+-- Binary search a packed table. Probes read raw bytes: the obvious
+-- sub()+tonumber(x,16) form allocated a string per probe (~13 per lookup),
+-- which showed up as a fifth of the whole background warmup.
+function ANx.PackedFind(s, id, vw)
+    if not s or not id then return nil end
+    vw = vw or 0
+    local rw = 4 + vw
+    local lo, hi = 0, mfloor(#s / rw) - 1
+    while lo <= hi do
+        local mid = mfloor((lo + hi) / 2)
+        local p = mid * rw
+        local b1, b2, b3, b4 = strbyte(s, p + 1, p + 4)
+        local v = HEXV[b1] * 4096 + HEXV[b2] * 256 + HEXV[b3] * 16 + HEXV[b4]
+        if v == id then
+            if vw == 0 then return true end
+            if vw == 1 then return HEXV[strbyte(s, p + 5)] end
+            if vw == 2 then
+                local c1, c2 = strbyte(s, p + 5, p + 6)
+                return HEXV[c1] * 16 + HEXV[c2]
+            end
+            local acc = 0
+            for i = p + 5, p + 4 + vw do acc = acc * 16 + HEXV[strbyte(s, i)] end
+            return acc
+        elseif v < id then
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return nil
+end
+
+-- ---------------------------------------------------------------------
+-- Consolidated per-item flag cache.
+-- The per-item predicate caches (bind, faction, accessory, quest-side,
+-- quest-only, quest-char-blocked, zone-exclusive, min-level) each used to
+-- be their own [itemId]=value hash. The background warmup fills every one
+-- of them for the whole universe, and each sparse hash rounds up to a
+-- 16,384-node table (~460 KB on the 32-bit client) - together ~3 MB to
+-- remember a few bits per item. They now share ONE packed-integer table.
+--
+-- Field layout of a flags value (0 always means "nothing known yet"):
+--   F_BIND   (3 bits)  1 retry-when-item-caches, 2 BOP, 3 BOE, 4 NONE
+--   F_FAC    (2 bits)  1 neutral, 2 Alliance, 3 Horde
+--   F_ACC    (2 bits)  1 not an accessory, 2 accessory
+--   F_QSIDE  (2 bits)  1 none/mixed, 2 Alliance, 3 Horde
+--   F_QONLY  (2 bits)  1 no, 2 yes (every source is a quest)
+--   F_QCHAR  (2 bits)  1 no, 2 yes (every quest impossible for this char)
+--   F_ZEX    (2 bits)  1 no, 2 yes (drops in exactly one zone)
+--   F_MINLVL (10 bits) 1 client-can't-say-yet, else requiredLevel + 2
+-- ---------------------------------------------------------------------
+ANx.F_BIND, ANx.F_FAC, ANx.F_ACC, ANx.F_QSIDE = 0, 3, 5, 7
+ANx.F_QONLY, ANx.F_QCHAR, ANx.F_ZEX, ANx.F_MINLVL = 9, 11, 13, 15
+
+local itemFlags = {}
+local band, lshift, rshift = bit.band, bit.lshift, bit.rshift
+
+-- Shared with Engine.lua, which reads fields INLINE off this table. The
+-- table object is never replaced (FlagClearMask nils entries in place), so
+-- a cached reference stays valid for the session. Reading through
+-- ANx.FlagGet costs two global lookups plus a call, and these predicates
+-- are read once per item per background warmup - it measured as a third of
+-- the warmup, so the hot accessors do the two bit ops themselves.
+ANx.ItemFlags = itemFlags
+
+function ANx.FlagGet(id, shift, mask)
+    local f = itemFlags[id]
+    if not f then return 0 end
+    return band(rshift(f, shift), mask)
+end
+
+function ANx.FlagSet(id, shift, mask, v)
+    local f = itemFlags[id] or 0
+    -- subtract the old field, add the new (fields never overlap, so plain
+    -- arithmetic avoids any bnot/sign pitfalls of the 3.3.5 bit library)
+    itemFlags[id] = f - lshift(band(rshift(f, shift), mask), shift)
+        + lshift(band(v, mask), shift)
+    return v
+end
+
+-- Clear specific fields (rawMask = field masks shifted into place) for every
+-- cached item. O(cached items), only used by the rare invalidation paths.
+function ANx.FlagClearMask(rawMask)
+    for id, f in pairs(itemFlags) do
+        local hit = band(f, rawMask)
+        if hit ~= 0 then
+            local rest = f - hit
+            if rest == 0 then itemFlags[id] = nil else itemFlags[id] = rest end
+        end
+    end
+end
+
+function ANx.FlagClearAll(shift, mask)
+    ANx.FlagClearMask(lshift(mask, shift))
+end
+
+-- ---------------------------------------------------------------------
 -- Item info helper (handles uncached + custom Synastria items)
 -- ---------------------------------------------------------------------
+-- [itemId] = display name. Name ONLY: caching the full {name, link, quality,
+-- tex} tuple kept a unique ~100-byte link string plus a 4-slot table alive for
+-- every item ever displayed (~2.5 MB once a search had touched the whole
+-- universe). Link/quality/texture are re-read live from the client - cheap C
+-- lookups once the item is resolvable.
 local itemNameCache = {}
 
-function ANx.GetItemDisplay(itemId)
-    -- returns name, link, quality, texture (name falls back to "Item #id")
-    local cached = itemNameCache[itemId]
-    if cached then return cached[1], cached[2], cached[3], cached[4] end
+-- Quality + texture for the items currently being DISPLAYED. Bounded and
+-- flushed wholesale on overflow (the srcCache pattern): rows re-read these
+-- every render, but only a screenful of items is ever live, so this stays
+-- tiny - unlike the old cache, which kept a table AND a unique link string
+-- for every item the search had ever touched.
+local dispCache, dispN = {}, 0
+local DISP_CAP = 3000
 
+function ANx.InvalidateDisplayCache()
+    dispCache, dispN = {}, 0
+end
+
+function ANx.GetItemDisplay(itemId, noRequest)
+    -- returns name, link, quality, texture (name falls back to "Item #id")
+    local cname = itemNameCache[itemId]
+    if cname then
+        local d = dispCache[itemId]
+        -- link is deliberately NOT cached (unique ~100-byte string per item);
+        -- the two shift-click sites fetch it live
+        if d then return cname, nil, d[1], d[2] end
+    end
     local name, link, quality, _, _, _, _, _, _, tex
     if GetItemInfoCustom then
         name, link, quality, _, _, _, _, _, _, tex = GetItemInfoCustom(itemId)
@@ -321,16 +492,51 @@ function ANx.GetItemDisplay(itemId)
         name, link, quality, _, _, _, _, _, _, tex = GetItemInfo(itemId)
     end
     if name then
-        itemNameCache[itemId] = { name, link, quality, tex }
+        itemNameCache[itemId] = name
+        if dispN >= DISP_CAP then dispCache, dispN = {}, 0 end
+        dispCache[itemId] = { quality, tex }
+        dispN = dispN + 1
         return name, link, quality, tex
     end
-    -- Ask the server to cache it; list will self-refresh shortly after
-    ANx.RequestItemCache(itemId)
-    return "Item #" .. itemId, nil, 1, "Interface\\Icons\\INV_Misc_QuestionMark"
+    name = itemNameCache[itemId]     -- resolved earlier this session
+    if not name then
+        -- Ask the server to cache it; list will self-refresh shortly after
+        if not noRequest then ANx.RequestItemCache(itemId) end
+        name = "Item #" .. itemId
+    end
+    return name, nil, 1, "Interface\\Icons\\INV_Misc_QuestionMark"
+end
+
+-- The item's chat link, fetched live. GetItemDisplay deliberately does NOT
+-- cache links (a unique ~100-byte string per item, and the old cache kept one
+-- for every item a search had ever touched), so anything that actually needs
+-- a link - chat insertion, loot alerts - asks for it here.
+function ANx.GetItemLink(itemId)
+    local _, link
+    if GetItemInfoCustom then _, link = GetItemInfoCustom(itemId) end
+    if not link and GetItemInfo then _, link = GetItemInfo(itemId) end
+    return link
+end
+
+-- Name-only accessor for bulk loops (search, sort keys). Never queries the
+-- server; returns nil for items the client hasn't resolved yet.
+function ANx.GetItemName(itemId)
+    local n = itemNameCache[itemId]
+    if n then return n end
+    if GetItemInfoCustom then n = GetItemInfoCustom(itemId) end
+    if not n and GetItemInfo then n = GetItemInfo(itemId) end
+    if n then itemNameCache[itemId] = n end
+    return n
 end
 
 local cacheTip
+local cacheRequested = {}   -- ask the server about each unresolved id at most
+                            -- once per session (SetHyperlink IS a server query;
+                            -- un-deduped it re-fired for the same ids on every
+                            -- render of a list containing them)
 function ANx.RequestItemCache(itemId)
+    if cacheRequested[itemId] then return end
+    cacheRequested[itemId] = true
     if not cacheTip then
         cacheTip = CreateFrame("GameTooltip", "AttuneNextCacheTip", nil, "GameTooltipTemplate")
         cacheTip:SetOwner(WorldFrame, "ANCHOR_NONE")
@@ -362,37 +568,70 @@ function ANx.InvalidateStatusCacheSets()
     scSets = nil
 end
 
+-- Decode helpers: the snapshot ships as packed strings (see ExportStatusCache)
+-- but the old array/hash form is still read for one session after upgrading.
+local function ScFillSet(t, s)
+    if type(s) == "string" then
+        for id in s:gmatch("%d+") do t[tonumber(id)] = true end
+    elseif type(s) == "table" then
+        for _, id in ipairs(s) do t[id] = true end
+    end
+end
+
+local function ScFillMap(t, s)
+    if type(s) == "string" then
+        for id, v in s:gmatch("(%d+):([%d%.]+)") do t[tonumber(id)] = tonumber(v) end
+    elseif type(s) == "table" then
+        for id, v in pairs(s) do t[id] = v end
+    end
+end
+
 local function SC()
     local sc = ANx.db and ANx.db.statusCache
     if not sc then return nil end
     local me = (_G.UnitName and _G.UnitName("player")) or "?"
     if sc.char ~= me then return nil end   -- another character's snapshot
     if not scSets then
-        scSets = { can = {}, acct = {}, tags = {} }
-        for _, id in ipairs(sc.can or {}) do scSets.can[id] = true end
-        for _, id in ipairs(sc.acct or {}) do scSets.acct[id] = true end
-        for _, id in ipairs(sc.tags or {}) do scSets.tags[id] = true end
+        scSets = { can = {}, acct = {}, tags = {}, prog = {}, forge = {} }
+        ScFillSet(scSets.can, sc.can)
+        ScFillSet(scSets.acct, sc.acct)
+        ScFillSet(scSets.tags, sc.tags)
+        ScFillMap(scSets.prog, sc.prog)
+        ScFillMap(scSets.forge, sc.forge)
     end
     return sc, scSets
 end
 
--- Save the snapshot (call when data is live: logout + after refresh)
+-- Save the snapshot (call when data is live: logout + after refresh).
+-- Everything is packed into a handful of concatenated strings: the old
+-- per-id arrays/hashes stayed resident in the db all session (~250-400 KB
+-- at high completion) and serialized as one SavedVariables line PER ID;
+-- the strings are a fraction of the RAM and parse in one gmatch pass.
 function ANx.ExportStatusCache()
     if not (ANx.db and ANx.Engine and ANx.dataReady) then return end
     local universe, ready = ANx.Engine.Universe()
     if not ready or #universe == 0 then return end
-    local sc = { char = (_G.UnitName and _G.UnitName("player")) or "?",
-                 prog = {}, can = {}, acct = {}, tags = {}, forge = {} }
+    local tags, can, acct, prog, forge = {}, {}, {}, {}, {}
     for _, id in ipairs(universe) do
-        if ANx.IsAttunableAtAll(id) then sc.tags[#sc.tags + 1] = id end
-        if ANx.CanCharAttune(id) then sc.can[#sc.can + 1] = id end
-        if ANx.AccountHasVariant(id) then sc.acct[#sc.acct + 1] = id end
+        if ANx.IsAttunableAtAll(id) then tags[#tags + 1] = id end
+        if ANx.CanCharAttune(id) then can[#can + 1] = id end
+        if ANx.AccountHasVariant(id) then acct[#acct + 1] = id end
         local p = ANx.Progress(id)
-        if p > 0 then sc.prog[id] = p end
+        if p > 0 then
+            -- floor at one decimal: never round 99.96 UP to an "attuned" 100
+            prog[#prog + 1] = id .. ":" .. string.format("%.1f", math.floor(p * 10) / 10)
+        end
         local f = (_G.GetItemAttuneForge and _G.GetItemAttuneForge(id)) or 0
-        if f >= 1 then sc.forge[id] = f end
+        if f >= 1 then forge[#forge + 1] = id .. ":" .. f end
     end
-    ANx.db.statusCache = sc
+    ANx.db.statusCache = {
+        char = (_G.UnitName and _G.UnitName("player")) or "?",
+        tags = "," .. table.concat(tags, ",") .. ",",
+        can = "," .. table.concat(can, ",") .. ",",
+        acct = "," .. table.concat(acct, ",") .. ",",
+        prog = table.concat(prog, ","),
+        forge = table.concat(forge, ","),
+    }
     scSets = nil
 end
 
@@ -414,8 +653,8 @@ end
 -- Attune progress 0..100
 function ANx.Progress(itemId)
     if not ANx.dataReady then
-        local sc = SC()
-        if sc then return (sc.prog and sc.prog[itemId]) or 0 end
+        local _, sets = SC()
+        if sets then return sets.prog[itemId] or 0 end
     end
     return (_G.GetItemAttuneProgress and _G.GetItemAttuneProgress(itemId)) or 0
 end
@@ -479,14 +718,19 @@ ANx.RUN_MODE_LABELS = {
     off = "Off", D = "Dungeons only", R = "Raids only",
     DR = "Dungeons & raids", Z = "Zones", all = "All",
 }
--- Which profession crafts this item (reverse lookup, built lazily)
+-- Which profession crafts this item (reverse lookup, built lazily).
+-- This is the ONE reverse index - Engine.ItemBucket uses it too (a second
+-- identical local copy in Engine.lua was deleted; it doubled the RAM).
 local profOfItem
 function ANx.ProfessionOfItem(itemId)
     if not profOfItem then
         profOfItem = {}
-        for prof, list in pairs(ANx.ProfessionItems or {}) do
-            for _, e in ipairs(list) do
-                if type(e) == "table" and e[1] then profOfItem[e[1]] = prof end
+        for prof, rows in pairs(ANx.ProfessionItems or {}) do
+            local ids = rows.ids or rows   -- parallel-array form (or legacy rows)
+            for i = 1, #ids do
+                local e = ids[i]
+                if type(e) == "number" then profOfItem[e] = prof
+                elseif type(e) == "table" and e[1] then profOfItem[e[1]] = prof end
             end
         end
     end
@@ -557,14 +801,20 @@ end
 function ANx.CurrentTier(itemId)
     local forge
     if not ANx.dataReady then
-        local sc = SC()
-        if sc then forge = (sc.forge and sc.forge[itemId]) or 0 end
+        local _, sets = SC()
+        if sets then forge = sets.forge[itemId] or 0 end
     end
     forge = forge or (_G.GetItemAttuneForge and _G.GetItemAttuneForge(itemId)) or 0
     if forge and forge >= 1 then
-        if forge >= 3 then return 4 end
-        if forge == 2 then return 3 end
-        return 2
+        -- forge level is ACCOUNT-wide: under Character scope it must not mark
+        -- an item done for a character that has never attuned it (an alt's
+        -- titanforge used to hide the item from this character's lists)
+        local scope = (ANx.db and ANx.db.scope) or "char"
+        if scope == "account" or ANx.IsAttuned(itemId) then
+            if forge >= 3 then return 4 end
+            if forge == 2 then return 3 end
+            return 2
+        end
     end
     if ANx.CountAttuned(itemId) then return 1 end
     return 0
@@ -598,21 +848,35 @@ end
 -- ---------------------------------------------------------------------
 -- Returns "BOP", "BOE", "NONE", or nil (not cached yet). Static seed first
 -- (from Data_ItemBind), else read from the item's tooltip like other addons do.
-local bindCache = {}
 local bindTip
+local BIND_CODE = { BOP = 2, BOE = 3, NONE = 4 }
+local BIND_NAME = { [2] = "BOP", [3] = "BOE", [4] = "NONE" }
+
+-- Static bind-type seed: ONE probe into the packed table (Data_ItemBind).
+local BIND_SEED = { [1] = "BOP", [2] = "BOE", [3] = "NONE" }
+function ANx.ItemBindSeed(itemId)
+    local c = ANx.ItemBindPacked and ANx.PackedFind(ANx.ItemBindPacked, itemId, 1)
+    return c and BIND_SEED[c] or nil
+end
 
 function ANx.InvalidateBindCache()
-    bindCache = {}
+    ANx.FlagClearAll(ANx.F_BIND, 7)
 end
 
 function ANx.BindType(itemId)
-    local c = bindCache[itemId]
-    if c then return c end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, 0), 7) or 0    -- F_BIND == 0
+    if c >= 2 then return BIND_NAME[c] end
     -- a cached "unknown" must never shadow the static seed (the tooltip may
     -- have been scanned before the item was in the client cache)
-    local seed = ANx.ItemBind and ANx.ItemBind[itemId]
-    if seed then bindCache[itemId] = seed; return seed end
-    if c == false then return nil end      -- resolved, genuinely unknown
+    local seed = ANx.ItemBindSeed(itemId)
+    if seed then ANx.FlagSet(itemId, ANx.F_BIND, 7, BIND_CODE[seed]); return seed end
+    if c == 1 then
+        -- scanned before the client had this item's data. Retry only once
+        -- the item resolves - otherwise a filtered render during the early
+        -- provisional window used to bake in "unknown" for the whole session
+        if not (GetItemInfo and GetItemInfo(itemId)) then return nil end
+    end
     if not CreateFrame then return nil end
     if not bindTip then
         bindTip = CreateFrame("GameTooltip", "AttuneNextBindTip", nil, "GameTooltipTemplate")
@@ -623,9 +887,9 @@ function ANx.BindType(itemId)
     if not ok then return nil end
     local n = bindTip:NumLines()
     if not n or n == 0 then
-        -- item not cached; cache "unknown" so counts don't rescan every render.
-        -- Rescan (/an reset) clears this once the item has been cached.
-        bindCache[itemId] = false
+        -- item not in the client cache yet; remember that so counts don't
+        -- rescan the tooltip every render (retried above once it caches)
+        ANx.FlagSet(itemId, ANx.F_BIND, 7, 1)
         return nil
     end
     local result = "NONE"
@@ -638,7 +902,7 @@ function ANx.BindType(itemId)
             elseif t == ITEM_BIND_ON_USE then result = "BOE"; break end
         end
     end
-    bindCache[itemId] = result
+    ANx.FlagSet(itemId, ANx.F_BIND, 7, BIND_CODE[result])
     return result
 end
 
@@ -646,33 +910,33 @@ end
 -- Accessories (cloak / ring / neck / trinket) - not armor-type restricted,
 -- so any character on the account can attune them.
 -- ---------------------------------------------------------------------
-local accCache = {}
 local ACCESSORY_LOC = {
     INVTYPE_CLOAK = true, INVTYPE_FINGER = true,
     INVTYPE_NECK = true, INVTYPE_TRINKET = true,
 }
 
 function ANx.InvalidateAccessoryCache()
-    accCache = {}
+    ANx.FlagClearAll(ANx.F_ACC, 3)
 end
 
 -- true if the item is a cloak/ring/neck/trinket. Static seed first, else the
--- item's equip location (needs the item cached; cached "false" once resolved).
+-- item's equip location (needs the item cached; cached "no" once resolved).
 function ANx.IsAccessory(itemId)
-    local c = accCache[itemId]
-    if c ~= nil then return c end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, 5), 3) or 0    -- F_ACC == 5
+    if c ~= 0 then return c == 2 end
     if ANx.AccessoryItems and ANx.AccessoryItems[itemId] then
-        accCache[itemId] = true; return true
+        ANx.FlagSet(itemId, ANx.F_ACC, 3, 2); return true
     end
     local loc
     if GetItemInfoCustom then loc = select(9, GetItemInfoCustom(itemId)) end
     if (not loc or loc == "") and GetItemInfo then loc = select(9, GetItemInfo(itemId)) end
     if not loc or loc == "" then
-        accCache[itemId] = false  -- uncached; assume not-accessory (safe: don't hide)
+        ANx.FlagSet(itemId, ANx.F_ACC, 3, 1)  -- uncached; assume not-accessory (safe: don't hide)
         return false
     end
     local r = ACCESSORY_LOC[loc] == true
-    accCache[itemId] = r
+    ANx.FlagSet(itemId, ANx.F_ACC, 3, r and 2 or 1)
     return r
 end
 
@@ -868,18 +1132,26 @@ end
 -- ---------------------------------------------------------------------
 local ALLIANCE_RACES = { "Human", "Dwarf", "Night Elf", "Gnome", "Draenei", "Worgen" }
 local HORDE_RACES    = { "Orc", "Scourge", "Undead", "Tauren", "Troll", "Blood Elf", "Goblin" }
-local factionCache = {}
 local factionTip
+local FAC_NAME = { [2] = "A", [3] = "H" }   -- flag code -> side (1 = neutral)
 
 function ANx.InvalidateFactionCache()
-    factionCache = {}
+    ANx.FlagClearAll(ANx.F_FAC, 3)
 end
 
 function ANx.ItemFactionOf(itemId)
-    local c = factionCache[itemId]
-    if c ~= nil then return c or nil end          -- false = resolved, neutral/unknown
-    local seed = ANx.ItemFaction and ANx.ItemFaction[itemId]
-    if seed then factionCache[itemId] = seed; return seed end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, 3), 3) or 0    -- F_FAC == 3
+    if c ~= 0 then return FAC_NAME[c] end         -- 1 = resolved, neutral/unknown
+    local seed = ANx.ItemFaction and ANx.ItemFaction[itemId]   -- optional override table
+    if not seed and ANx.ItemFactionPacked then
+        local side = ANx.PackedFind(ANx.ItemFactionPacked, itemId, 1)
+        seed = (side == 1 and "A") or (side == 2 and "H") or nil
+    end
+    if seed then
+        ANx.FlagSet(itemId, ANx.F_FAC, 3, seed == "A" and 2 or 3)
+        return seed
+    end
     if not CreateFrame then return nil end
     if not factionTip then
         factionTip = CreateFrame("GameTooltip", "AttuneNextFactionTip", nil, "GameTooltipTemplate")
@@ -916,7 +1188,7 @@ function ANx.ItemFactionOf(itemId)
             elseif h >= 3 and a == 0 then result = "H"; break end
         end
     end
-    factionCache[itemId] = result
+    ANx.FlagSet(itemId, ANx.F_FAC, 3, result == "A" and 2 or result == "H" and 3 or 1)
     return result or nil
 end
 
@@ -929,10 +1201,10 @@ function ANx.FactionAllowed(itemId)
     return itf == fac
 end
 
--- Which side can do this quest? "A"/"H", or nil for both/unknown. The
--- curated QuestFaction seed answers first; quests it misses are derived
--- from their DBC race mask (Data_QuestReq) - a quest only Horde races can
--- take IS a Horde quest.
+-- Which side can do this quest? "A"/"H", or nil for both/unknown. Derived
+-- from the quest's DBC race mask (Data_QuestReq) - a quest only Horde races
+-- can take IS a Horde quest. An optional ANx.QuestFaction override table is
+-- consulted first (the shipped copy was deleted: it was 100% derivable).
 local Q_ALLIANCE_MASK = 1 + 4 + 8 + 64 + 1024      -- Human/Dwarf/NElf/Gnome/Draenei
 local Q_HORDE_MASK    = 2 + 16 + 32 + 128 + 512    -- Orc/Undead/Tauren/Troll/Belf
 
@@ -945,11 +1217,60 @@ function ANx.PlayerFactionSide()
     return nil
 end
 
+-- DBC race/class mask for a quest, from the packed palette encoding in
+-- Data_QuestReq (nil = no restriction of that kind).
+function ANx.QuestRaceMaskOf(questId)
+    local i = ANx.QuestRacesPacked and ANx.PackedFind(ANx.QuestRacesPacked, questId, 2)
+    return i and ANx.QuestRaceMasks and ANx.QuestRaceMasks[i] or nil
+end
+
+function ANx.QuestClassMaskOf(questId)
+    local i = ANx.QuestClassesPacked and ANx.PackedFind(ANx.QuestClassesPacked, questId, 2)
+    return i and ANx.QuestClassMasks and ANx.QuestClassMasks[i] or nil
+end
+
+-- Decode a QuestGivers value ("zoneAreaId:x10:y10:name", Data_QuestGivers)
+-- -> zoneAreaId, x*10, y*10, giverName. nil when the quest has no giver.
+function ANx.QuestGiver(qid)
+    local e = ANx.QuestGivers and ANx.QuestGivers[qid]
+    if not e then return nil end
+    local zone, x, y, name = e:match("^(%d+):(%d+):(%d+):(.*)$")
+    if not zone then return nil end
+    if name == "" then name = nil end
+    return tonumber(zone), tonumber(x), tonumber(y), name
+end
+
+-- Decode a VendorLocs value ("zoneAreaId:x10:y10", Data_VendorLocs)
+-- -> zoneAreaId, x*10, y*10.
+function ANx.VendorLoc(npcId)
+    local e = npcId and ANx.VendorLocs and ANx.VendorLocs[npcId]
+    if not e then return nil end
+    local zone, x, y = e:match("^(%d+):(%d+):(%d+)$")
+    if not zone then return nil end
+    return tonumber(zone), tonumber(x), tonumber(y)
+end
+
+-- Quest name from the packed name blobs (Data_QuestGivers). Only needed for
+-- click-time chat/arrow labels, so an O(n) scan of a few big strings replaces
+-- a ~440 KB always-resident hash. QuestNamesExtra (dropped-item starters from
+-- Data_QuestItemStarts) is the fallback, matching the old merge precedence.
+function ANx.QuestNameOf(qid)
+    local blobs = ANx.QuestNameBlobs
+    if blobs then
+        local pat = "\n" .. qid .. "=([^\n]*)"
+        for i = 1, #blobs do
+            local n = blobs[i]:match(pat)
+            if n then return n end
+        end
+    end
+    return ANx.QuestNamesExtra and ANx.QuestNamesExtra[qid] or nil
+end
+
 function ANx.QuestFactionSide(questId)
     if not questId then return nil end
     local f = ANx.QuestFaction and ANx.QuestFaction[questId]
     if f then return f end
-    local r = ANx.QuestRaces and ANx.QuestRaces[questId]
+    local r = ANx.QuestRaceMaskOf(questId)
     if not r then return nil end
     local a = bit.band(r, Q_ALLIANCE_MASK) ~= 0
     local h = bit.band(r, Q_HORDE_MASK) ~= 0
@@ -966,9 +1287,11 @@ function ANx.NodeFactionAllowed(kind, id)
         local side = ANx.QuestFactionSide(id)
         return not side or side == fac
     end
-    local nf = ANx.VendorFaction and ANx.VendorFaction[id]
-    if not nf then return true end
-    return nf == fac
+    -- a vendor passes unless it belongs to the OTHER side (one packed probe)
+    if not ANx.VendorFactionPacked then return true end
+    local side = ANx.PackedFind(ANx.VendorFactionPacked, id, 1)
+    if not side then return true end                    -- neutral / unlisted
+    return (side == 1 and "A" or "H") == fac
 end
 
 -- ---------------------------------------------------------------------
@@ -986,6 +1309,7 @@ local playerRaceMask, playerClassMask
 
 function ANx.InvalidatePlayerIdentity()
     playerRaceMask, playerClassMask = nil, nil
+    if ANx.InvalidateQuestDoable then ANx.InvalidateQuestDoable() end
 end
 
 function ANx.PlayerRaceMask()
@@ -1021,19 +1345,34 @@ ANx.QuestRaceExtra = ANx.QuestRaceExtra or {}
 
 -- Can the CURRENT CHARACTER (race + class) ever complete this quest?
 -- Unknown quests / missing data count as doable.
+-- Memoized: the answer depends only on the quest and this character's fixed
+-- race/class, but BestSource asks it for every quest source of every item it
+-- ranks - two packed binary searches per ask was measurably hot.
+local questDoable = {}
+
+function ANx.InvalidateQuestDoable()
+    questDoable = {}
+end
+
 function ANx.CharCanDoQuest(questId)
     if not questId then return true end
-    local r = (ANx.QuestRaces and ANx.QuestRaces[questId]) or ANx.QuestRaceExtra[questId]
+    local memo = questDoable[questId]
+    if memo ~= nil then return memo end
+    local ok = true
+    local r = ANx.QuestRaceMaskOf(questId) or ANx.QuestRaceExtra[questId]
     if r then
         local pm = ANx.PlayerRaceMask()
-        if pm ~= 0 and bit.band(r, pm) == 0 then return false end
+        if pm ~= 0 and bit.band(r, pm) == 0 then ok = false end
     end
-    local c = (ANx.QuestClasses and ANx.QuestClasses[questId]) or ANx.QuestClassExtra[questId]
-    if c then
-        local pm = ANx.PlayerClassMask()
-        if pm ~= 0 and bit.band(c, pm) == 0 then return false end
+    if ok then
+        local c = ANx.QuestClassMaskOf(questId) or ANx.QuestClassExtra[questId]
+        if c then
+            local pm = ANx.PlayerClassMask()
+            if pm ~= 0 and bit.band(c, pm) == 0 then ok = false end
+        end
     end
-    return true
+    questDoable[questId] = ok
+    return ok
 end
 
 -- Quest-page filter: "mine" (default) hides quests this character can never
@@ -1057,7 +1396,9 @@ function ANx.IsAttunableAtAll(itemId)
     end
     if _G.GetItemTagsCustom then
         local t = _G.GetItemTagsCustom(itemId)
-        if t then return bit.band(t, 64) ~= 0 end
+        -- bit 64 = Attunable, bit 32 = Disabled: a disabled item is
+        -- unobtainable and must not inflate (account-scope) totals
+        if t then return bit.band(t, 64) ~= 0 and bit.band(t, 32) == 0 end
     end
     if _G.IsAttunableBySomeone then
         local r = _G.IsAttunableBySomeone(itemId)
@@ -1092,9 +1433,33 @@ function ANx.PlayerCurrency(name)
     if not currencyMap or (now - currencyMapAt) > 5 then
         currencyMap = {}
         if GetCurrencyListSize and GetCurrencyListInfo then
+            -- rows under a COLLAPSED header vanish from the enumeration, so
+            -- temporarily expand collapsed headers and restore them after -
+            -- otherwise the Affordable filter reads 0 for those currencies
+            local collapsed
+            if ExpandCurrencyList then
+                local i = 1
+                while i <= GetCurrencyListSize() do
+                    local cname, isHeader, isExpanded = GetCurrencyListInfo(i)
+                    if isHeader and not isExpanded then
+                        collapsed = collapsed or {}
+                        collapsed[cname or ""] = true
+                        ExpandCurrencyList(i, 1)
+                    end
+                    i = i + 1
+                end
+            end
             for i = 1, GetCurrencyListSize() do
                 local cname, isHeader, _, _, _, count = GetCurrencyListInfo(i)
                 if cname and not isHeader then currencyMap[cname] = count or 0 end
+            end
+            if collapsed and ExpandCurrencyList then
+                for i = GetCurrencyListSize(), 1, -1 do
+                    local cname, isHeader = GetCurrencyListInfo(i)
+                    if isHeader and collapsed[cname or ""] then
+                        ExpandCurrencyList(i, 0)
+                    end
+                end
             end
         end
         currencyMapAt = now
@@ -1104,7 +1469,24 @@ end
 
 -- Player's current world position: continent index, zone index, x, y (0..1).
 -- Continent/zone indices match GetMapContinents()/GetMapZones() ordering.
+-- Cached ~1s: distance sorting used to call this once per row (or per sort
+-- COMPARISON in the arrow router) and every call did a SetMapToCurrentZone
+-- round trip - which also visibly snaps the user's open world map.
+local locC, locZ, locX, locY, locAt = nil, nil, 0, 0, -10
+
+function ANx.InvalidatePlayerLoc()
+    locAt = -10
+end
+
 function ANx.PlayerLoc()
+    local now = (GetTime and GetTime()) or 0
+    if now - locAt < 1 then return locC, locZ, locX, locY end
+    -- never touch the map while the player is browsing it: SetMapToCurrentZone
+    -- yanks an open world map back to the current zone. Serve the last fix.
+    if _G.WorldMapFrame and _G.WorldMapFrame.IsShown and _G.WorldMapFrame:IsShown() then
+        return locC, locZ, locX, locY
+    end
+    locAt = now
     if SetMapToCurrentZone then pcall(SetMapToCurrentZone) end
     local c = GetCurrentMapContinent and GetCurrentMapContinent() or nil
     local z = GetCurrentMapZone and GetCurrentMapZone() or nil
@@ -1115,6 +1497,7 @@ function ANx.PlayerLoc()
     end
     if type(c) ~= "number" or c < 1 then c = nil end
     if type(z) ~= "number" or z < 1 then z = nil end
+    locC, locZ, locX, locY = c, z, x, y
     return c, z, x, y
 end
 
@@ -1156,6 +1539,20 @@ function ANx.ItemsInZone(zoneId)
 end
 
 -- All sources of an item: { {srcType, objType, objId, chance, perMille, objName, zoneName, spawned}, ... }
+-- lowercased zone names, memoized: there are only a few hundred distinct
+-- zone strings but hundreds of thousands of source rows, so calling :lower()
+-- per row during the warmup was pure waste
+local zoneLowerCache = {}
+local function ZoneLower(zoneName)
+    if not zoneName or zoneName == "" then return "" end
+    local l = zoneLowerCache[zoneName]
+    if not l then
+        l = zoneName:lower()
+        zoneLowerCache[zoneName] = l
+    end
+    return l
+end
+
 function ANx.GetSources(itemId)
     if not ANx.LootDbLoaded() then return {} end
     local n = _G.ItemLocGetSourceCount(itemId)
@@ -1168,6 +1565,9 @@ function ANx.GetSources(itemId)
                 srcType = srcType, objType = objType, objId = objId,
                 chance = chance or 0, perMille = perMille,
                 objName = objName or "?", zoneName = zoneName or "",
+                -- pre-lowered once here (memoized): zone matching used to
+                -- allocate two lowered strings per comparison in hot loops
+                zoneLower = ZoneLower(zoneName),
                 spawned = spawned,
             }
         end
@@ -1223,8 +1623,14 @@ local function WatchRefreshDone()
     ANx.After(1, WatchRefreshDone)
 end
 
--- Global function invoked by the Synastria client when server data is fully loaded
+-- Global function invoked by the Synastria client when server data is fully loaded.
+-- Both the SynastriaSafeInvoke queue and the login poll below can call this;
+-- collapse near-simultaneous duplicates while still honoring later re-pushes.
+local lastDataReadyAt = 0
 function AttuneNext_OnDataReady()
+    local now = (GetTime and GetTime()) or 0
+    if ANx.dataReady and (now - lastDataReadyAt) < 10 then return end
+    lastDataReadyAt = now
     TryInit()
     ANx.dataReady = true
     ANx.InvalidateStatusCacheSets()
@@ -1243,6 +1649,8 @@ function AttuneNext_OnDataReady()
     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     -- alt awareness: snapshot what this character can attune (background)
     if ANx.SnapshotAltCan then ANx.After(8, ANx.SnapshotAltCan) end
+    -- one-time SavedVariables trim (needs live attunable data)
+    if ANx.TrimMerchantDb then ANx.After(15, ANx.TrimMerchantDb) end
     -- on-screen goal window
     if ANx.GoalHudUpdate then ANx.After(6, ANx.GoalHudUpdate) end
 end
@@ -1274,30 +1682,48 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         local prevHandler = _G.OnCustomGameData
         _G.OnCustomGameData = function(typeId, id, prev, cur)
             if prevHandler then prevHandler(typeId, id, prev, cur) end
-            if typeId == 11 then -- ATTUNE_HAS
-                ANx.MarkAttuneDirty()
+            if typeId == 11 then -- ATTUNE_HAS: fires on EVERY progress tick
                 if ANx.OnAttuneCompleted then ANx.OnAttuneCompleted(id) end
-                if ANx.Plates then ANx.Plates.OnAttune() end
-                if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(false) end
-                if ANx.GoalHudUpdate then ANx.GoalHudUpdate() end
+                -- stats/marks only change when an item CROSSES 100%: run the
+                -- cache-wiping paths on completion only. A mere progress tick
+                -- (roughly every kill while wearing attuning gear) just
+                -- refreshes the visible window, throttled, with caches intact.
+                local done = (not id) or (ANx.Progress(id) or 0) >= 100
+                if done then
+                    ANx.MarkAttuneDirty()
+                    if ANx.Plates then ANx.Plates.OnAttune() end
+                    if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(false) end
+                    if ANx.GoalHudUpdate then ANx.GoalHudUpdate() end
+                else
+                    ANx.MarkProgressDirty()
+                end
             end
         end
     elseif event == "PLAYER_LOGIN" then
         if _G.SynastriaSafeInvoke then
             _G.SynastriaSafeInvoke("AttuneNext_OnDataReady")
-        else
-            -- Fallback: poll for data-ready
-            local tries = 0
-            local function poll()
-                tries = tries + 1
-                if (_G.GetCustomGameData and _G.GetCustomGameData(41, 0) ~= 0) or tries > 20 then
+        end
+        -- ALWAYS also poll: the SynastriaSafeInvoke queue has historically been
+        -- cleared on /reload, which would otherwise leave the addon stuck
+        -- serving the stale status cache all session. The guard in
+        -- AttuneNext_OnDataReady collapses a double fire.
+        local tries = 0
+        local function poll()
+            if ANx.dataReady then return end
+            tries = tries + 1
+            if _G.GetCustomGameData then
+                if _G.GetCustomGameData(41, 0) ~= 0 then
                     AttuneNext_OnDataReady()
-                else
+                elseif tries <= 600 then
                     ANx.After(1, poll)
                 end
+            elseif tries > 20 then
+                AttuneNext_OnDataReady()   -- non-Synastria client: init anyway
+            else
+                ANx.After(1, poll)
             end
-            poll()
         end
+        poll()
     elseif event == "MERCHANT_SHOW" then
         if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant) end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
@@ -1310,12 +1736,16 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "START_LOOT_ROLL" then
         if ANx.CheckLootRoll then ANx.CheckLootRoll(arg1) end
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        if ANx.InvalidatePlayerLoc then ANx.InvalidatePlayerLoc() end
         if ANx.UpdateCurrentInstance then ANx.UpdateCurrentInstance() end
         if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
         if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras) end
         if ANx.Plates then ANx.Plates.OnZone() end
     elseif event == "UNIT_AURA" then
-        if arg1 == "player" and ANx.ScanSpeedAuras then ANx.ScanSpeedAuras() end
+        -- debounced: in instanced combat this fires several times per second,
+        -- and each scan is an Instances sweep + up-to-40 UnitBuff loop + a
+        -- tooltip scrape for values that only change on new records
+        if arg1 == "player" and ANx.QueueSpeedAuraScan then ANx.QueueSpeedAuraScan() end
     elseif event == "PLAYER_LEVEL_UP" then
         -- the level filters compare against the character's level
         if ANx.Engine then ANx.Engine.InvalidateStats() end
@@ -1326,10 +1756,9 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         pcall(ANx.ExportStatusCache)
     elseif event == "PLAYER_MONEY" or event == "CURRENCY_DISPLAY_UPDATE" then
         ANx.InvalidatePlayerCurrency()
-        if ANx.db and ANx.db.affordableOnly then
-            if ANx.Engine then ANx.Engine.InvalidateStats() end
-            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
-        end
+        -- coalesced: while farming, every coin looted fires this (bursts per
+        -- second); the old code wiped every stat cache + re-rendered per event
+        if ANx.db and ANx.db.affordableOnly then ANx.MarkMoneyDirty() end
     end
 end)
 
@@ -1342,6 +1771,43 @@ function ANx.MarkAttuneDirty()
         dirtyPending = false
         if ANx.Engine then ANx.Engine.InvalidateStats() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end)
+end
+
+-- Debounced light refresh for mere attune-progress ticks (no cache wipe:
+-- progress text re-reads the live APIs anyway)
+local progPending = false
+function ANx.MarkProgressDirty()
+    if progPending then return end
+    progPending = true
+    ANx.After(2, function()
+        progPending = false
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end)
+end
+
+-- Debounced stats invalidation for money/currency changes (affordable filter)
+local moneyPending = false
+function ANx.MarkMoneyDirty()
+    if moneyPending then return end
+    moneyPending = true
+    ANx.After(2, function()
+        moneyPending = false
+        if ANx.db and ANx.db.affordableOnly then
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+        end
+    end)
+end
+
+-- Debounced speed-aura scan (UNIT_AURA storms in combat)
+local speedScanPending = false
+function ANx.QueueSpeedAuraScan()
+    if speedScanPending then return end
+    speedScanPending = true
+    ANx.After(2, function()
+        speedScanPending = false
+        if ANx.ScanSpeedAuras then ANx.ScanSpeedAuras() end
     end)
 end
 

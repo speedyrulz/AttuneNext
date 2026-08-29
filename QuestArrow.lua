@@ -80,9 +80,24 @@ end
 --           "chain_inlog"          (a prerequisite is already in the log)
 --           "unknown"              (no completed-quest data yet)
 -- ---------------------------------------------------------------------
+-- QuestPre rows ship as packed "minLevel:parent:mode:p1:p2..." strings
+-- (Data_QuestGivers). Decode into ONE reusable scratch table - the resolver
+-- only ever inspects a single row at a time, so no allocation per hop.
+local preScratch = {}
+local function PreRow(qid)
+    local s = ANx.QuestPre and ANx.QuestPre[qid]
+    if not s then return nil end
+    local n = 0
+    for num in s:gmatch("%-?%d+") do
+        n = n + 1
+        preScratch[n] = tonumber(num)
+    end
+    for i = #preScratch, n + 1, -1 do preScratch[i] = nil end
+    return preScratch
+end
+
 function ANx.ResolveActionableQuest(qid)
     if not completed then return qid, "unknown", 0, nil end
-    local pre = ANx.QuestPre or {}
     local visited, hops = {}, 0
     local cur = qid
     while true do
@@ -97,7 +112,7 @@ function ANx.ResolveActionableQuest(qid)
             return cur, (cur == qid) and "inlog" or "chain_inlog", hops, cur
         end
 
-        local row = pre[cur]
+        local row = PreRow(cur)
         local nextQuest = nil
         -- chains fork per faction: an "either of" list can hold the Alliance
         -- AND the Horde copy of the same step, and a parent can be the other
@@ -214,7 +229,7 @@ local function SendWaypoint(c, z, x, y, label)
 end
 
 local function QuestName(qid, fallback)
-    return (ANx.QuestNames and ANx.QuestNames[qid]) or fallback or ("quest " .. tostring(qid))
+    return (ANx.QuestNameOf and ANx.QuestNameOf(qid)) or fallback or ("quest " .. tostring(qid))
 end
 
 local function ZoneNameById(zoneId)
@@ -279,10 +294,15 @@ function ANx.ArrowToItem(itemId)
         end
     end
     if #drops > 0 then
+        -- rank once per source, then compare the cached ranks: DistanceRank
+        -- inside the comparator ran O(n log n) map-API round trips per click
+        local rank = {}
+        for _, sc in ipairs(drops) do
+            rank[sc] = ANx.DistanceRank({ zoneName = sc.zoneName })
+        end
         table.sort(drops, function(x, y)
             if (x.chance or 0) ~= (y.chance or 0) then return (x.chance or 0) > (y.chance or 0) end
-            return ANx.DistanceRank({ zoneName = x.zoneName })
-                 < ANx.DistanceRank({ zoneName = y.zoneName })
+            return rank[x] < rank[y]
         end)
         local d = drops[1]
         if ANx.HasRareLoc and ANx.HasRareLoc(d.objId) then
@@ -314,10 +334,11 @@ function ANx.ArrowToItem(itemId)
         if sc.srcType == S.VENDOR then vends[#vends + 1] = sc end
     end
     if #vends > 0 then
-        table.sort(vends, function(x, y)
-            return ANx.DistanceRank({ zoneName = x.zoneName })
-                 < ANx.DistanceRank({ zoneName = y.zoneName })
-        end)
+        local rank = {}
+        for _, sc in ipairs(vends) do
+            rank[sc] = ANx.DistanceRank({ zoneName = sc.zoneName })
+        end
+        table.sort(vends, function(x, y) return rank[x] < rank[y] end)
         return ANx.SetVendorWaypoint(vends[1].objId, vends[1].objName)
     end
     -- 4) craft-only: open the profession window
@@ -348,24 +369,24 @@ end
 
 -- Sets the arrow to the giver of a specific quest id. Returns true on arrow.
 local function ArrowToGiver(qid, label)
-    local e = ANx.QuestGivers and ANx.QuestGivers[qid]
-    if not e then
+    local zone, x, y, giver = ANx.QuestGiver(qid)
+    if not zone then
         ANx.Print("No quest giver location known for \"" .. QuestName(qid)
             .. "\" (it may start from a dropped item).")
         return false
     end
-    return ArrowToPoint(e[1], e[2] / 10, e[3] / 10, label, e[4])
+    return ArrowToPoint(zone, x / 10, y / 10, label, giver)
 end
 
 -- Public: arrow to a vendor's spawn location (npcId from the loot DB).
 function ANx.SetVendorWaypoint(npcId, vendorName)
     vendorName = vendorName or "Vendor"
-    local e = npcId and ANx.VendorLocs and ANx.VendorLocs[npcId]
-    if not e then
+    local zone, x, y = ANx.VendorLoc(npcId)
+    if not zone then
         ANx.Print("No location known for vendor \"" .. vendorName .. "\".")
         return false
     end
-    return ArrowToPoint(e[1], e[2] / 10, e[3] / 10, vendorName, vendorName)
+    return ArrowToPoint(zone, x / 10, y / 10, vendorName, vendorName)
 end
 
 function ANx.HasVendorLoc(npcId)
@@ -438,16 +459,16 @@ function ANx.SetQuestWaypoint(questId, questTitle)
             "You can't pick up \"%s\" yet. |cffffd100Next step:|r \"%s\"%s",
             title, targetName,
             hops > 1 and string.format(" |cff888888(%d quests in the chain before it unlocks)|r", hops) or ""))
-        -- level requirement note for the actionable quest
-        local row = ANx.QuestPre and ANx.QuestPre[target]
-        if row and row[1] > 0 and UnitLevel and UnitLevel("player") < row[1] then
-            ANx.Print("|cffff8040Note:|r \"" .. targetName .. "\" requires level " .. row[1] .. ".")
+        -- level requirement note for the actionable quest (first packed field)
+        local preStr = ANx.QuestPre and ANx.QuestPre[target]
+        local minLvl = preStr and tonumber(preStr:match("^(%d+)"))
+        if minLvl and minLvl > 0 and UnitLevel and UnitLevel("player") < minLvl then
+            ANx.Print("|cffff8040Note:|r \"" .. targetName .. "\" requires level " .. minLvl .. ".")
         end
         return ArrowToGiver(target, targetName .. " (unlocks: " .. title .. ")")
     end
 
     -- ready
-    local e = ANx.QuestGivers[questId]
-    local giver = e and e[4]
+    local _, _, _, giver = ANx.QuestGiver(questId)
     return ArrowToGiver(questId, title .. (giver and (" (" .. giver .. ")") or ""))
 end

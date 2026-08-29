@@ -80,7 +80,8 @@ function ANx.OnAttuneCompleted(itemId)
         local id = ItemIdFromLink(_G.GetInventoryItemLink("player", slot))
         if id == itemId then
             announcedDone[itemId] = true
-            local name, link = ANx.GetItemDisplay(itemId)
+            local name = ANx.GetItemDisplay(itemId)
+            local link = ANx.GetItemLink(itemId)
             Announce("|cff00ff00Fully attuned:|r " .. tostring(link or name or itemId)
                 .. " |cffffd100- swap it for the next one!|r")
             return

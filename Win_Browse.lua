@@ -25,6 +25,8 @@ local curW, curH = DEF_W, DEF_H
 local listTop = -128                     -- recomputed per render (below filters)
 local visibleRows = 15
 local sizing, dragStart
+local builtRows = {}                     -- rows built by W.Render; the scroll
+                                         -- handler and resize drag only repaint
 
 -- ---------------------------------------------------------------------
 -- Sizing (manual cursor deltas: the engine's StartSizing snaps the frame
@@ -164,7 +166,8 @@ local function Ensure()
     f.scroll:SetPoint("TOPLEFT", 16, listTop)
     f.scroll:SetPoint("BOTTOMRIGHT", -34, FOOTER_H)
     f.scroll:SetScript("OnVerticalScroll", function(self, offset)
-        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, W.Render)
+        -- repaint only - never rebuild the view per scroll notch
+        FauxScrollFrame_OnVerticalScroll(self, offset, ROW_H, W.Paint)
     end)
 
     f.status = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
@@ -214,7 +217,7 @@ local function Ensure()
             if es == 0 then es = 1 end
             ApplySize(dragStart.w + (cx - dragStart.cx) / es,
                       dragStart.h + (dragStart.cy - cy) / es)
-            W.Render()
+            W.Paint()   -- reposition + repaint only; FinishSizing full-renders once
         end
     end)
 
@@ -237,9 +240,29 @@ end
 -- ---------------------------------------------------------------------
 local FILTER_W, FILTER_H, FILTER_GAP = 118, 20, 4
 
+-- Position the existing filter buttons for the current width; returns the
+-- list top. Cheap: no defs rebuild, no new closures - safe to run per frame
+-- during a resize drag.
+local function PlaceFilters(f)
+    local shown = f.anxFilterCount or 0
+    local perRow = math.max(1, math.floor((curW - 32 + FILTER_GAP) / (FILTER_W + FILTER_GAP)))
+    for i = 1, shown do
+        local b = f.filters[i]
+        if b then
+            local row = math.floor((i - 1) / perRow)
+            local col = (i - 1) % perRow
+            if b.ClearAllPoints then b:ClearAllPoints() end
+            b:SetPoint("TOPLEFT", f, "TOPLEFT",
+                16 + col * (FILTER_W + FILTER_GAP), -76 - row * (FILTER_H + FILTER_GAP))
+        end
+    end
+    local rows = math.max(1, math.ceil(shown / perRow))
+    return -76 - rows * (FILTER_H + FILTER_GAP) - 8
+end
+
 local function LayoutFilters(f, view)
     local defs = ANx.UI.FilterDefs(view)
-    local perRow = math.max(1, math.floor((curW - 32 + FILTER_GAP) / (FILTER_W + FILTER_GAP)))
+    f.anxFilterCount = #defs
     for i, d in ipairs(defs) do
         local b = f.filters[i]
         if not b then
@@ -251,11 +274,6 @@ local function LayoutFilters(f, view)
             end
             f.filters[i] = b
         end
-        local row = math.floor((i - 1) / perRow)
-        local col = (i - 1) % perRow
-        if b.ClearAllPoints then b:ClearAllPoints() end
-        b:SetPoint("TOPLEFT", f, "TOPLEFT",
-            16 + col * (FILTER_W + FILTER_GAP), -76 - row * (FILTER_H + FILTER_GAP))
         b:SetText(d.label)
         b:SetScript("OnClick", function()
             d.click()
@@ -264,20 +282,19 @@ local function LayoutFilters(f, view)
         b:Show()
     end
     for i = #defs + 1, #f.filters do f.filters[i]:Hide() end
-    local rows = math.max(1, math.ceil(#defs / perRow))
-    return -76 - rows * (FILTER_H + FILTER_GAP) - 8
+    return PlaceFilters(f)
 end
 
 -- ---------------------------------------------------------------------
 -- Render
 -- ---------------------------------------------------------------------
-function W.Render()
+-- Reposition + repaint from the already-built rows. The fast path for scroll
+-- notches and the resize drag: no filter-def rebuild, no view-builder re-run
+-- (W.Render used to re-run both on every frame of a resize drag).
+function W.Paint()
     local f = frame
     if not f or not f:IsShown() then return end
-    local view = ANx.UI.Current()
-    if not view then return end
-
-    listTop = LayoutFilters(f, view)
+    listTop = PlaceFilters(f)
     -- how many rows fit at the current height
     visibleRows = math.floor((curH + listTop - FOOTER_H) / ROW_H)
     if visibleRows < 3 then visibleRows = 3 end
@@ -290,10 +307,7 @@ function W.Render()
         f.scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -34, FOOTER_H)
     end
 
-    local rows = ANx.UI.BuildRows(view)
-    ANx.UI.FitText(f.title, "|cffffd100" .. ANx.UI.ViewTitleOf(view) .. "|r", curW - 140)
-    if #ANx.UI.stack > 1 then f.back:Enable() else f.back:Disable() end
-
+    local rows = builtRows
     FauxScrollFrame_Update(f.scroll, #rows, visibleRows, ROW_H)
     local offset = FauxScrollFrame_GetOffset(f.scroll)
     for i = 1, MAX_ROWS do
@@ -320,6 +334,19 @@ function W.Render()
             b:Hide()
         end
     end
+end
+
+function W.Render()
+    local f = frame
+    if not f or not f:IsShown() then return end
+    local view = ANx.UI.Current()
+    if not view then return end
+
+    LayoutFilters(f, view)
+    builtRows = ANx.UI.BuildRows(view)
+    ANx.UI.FitText(f.title, "|cffffd100" .. ANx.UI.ViewTitleOf(view) .. "|r", curW - 140)
+    if #ANx.UI.stack > 1 then f.back:Enable() else f.back:Disable() end
+    W.Paint()
 
     if not ANx.LootDbLoaded() then
         f.status:SetText("|cffff4040Loot DB not loaded - lists will be empty|r")
@@ -355,6 +382,7 @@ end
 function W.OnHide()
     sizing = false
     dragStart = nil
+    builtRows = {}   -- release the last view's row descriptors
     if ANx.UI.renderTarget == W then
         ANx.UI.renderTarget = nil
         ANx.UI.stack = W.savedStack or { { type = "root" } }

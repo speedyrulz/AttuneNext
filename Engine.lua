@@ -15,9 +15,11 @@ local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
 local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
 local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
 local srcCacheN     = 0    -- entries in srcCache
-local SRC_CACHE_CAP = 3000 -- flush past this: source arrays are heavy and only
-                           -- a handful of items are ever viewed at once
-local zexCache      = {}   -- [itemId]        -> bool: drops in exactly one zone
+local srcCacheCap   = 3000 -- flush past this: source arrays are heavy (~8 named
+                           -- fields per record) and only a handful of items are
+                           -- ever viewed at once. Big while the warmup sweeps;
+                           -- FlushSources lowers it once the derived predicate
+                           -- caches are filled (~1+ MB steady-state saved)
 local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
 local eventItemsCache = {} -- [eventName]     -> { itemIds }
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
@@ -27,9 +29,26 @@ local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
 local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
 local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
 local pickCache = {}       -- ["which|view"] -> { rev =, id = itemId or false }
-local questSideCache = {}  -- [itemId] = "A"/"H" (quest-only, one side) or false
-local questCharCache = {}  -- [itemId] = true when quest-only + no doable quest
+-- Per-item quest-side / quest-only / char-blocked / zone-exclusive /
+-- min-level predicates live in the consolidated flag cache (Core.lua). The
+-- accessors below read their field INLINE off this shared table: going
+-- through ANx.FlagGet cost two global lookups plus a call per read, and the
+-- warmup performs one read (and one write) per item per predicate.
+local itemFlags = ANx.ItemFlags
+local band, lshift, rshift = bit.band, bit.lshift, bit.rshift
+local F_QSIDE, F_QONLY, F_QCHAR = ANx.F_QSIDE, ANx.F_QONLY, ANx.F_QCHAR
+local F_ZEX, F_MINLVL = ANx.F_ZEX, ANx.F_MINLVL
+
+-- write one field without the ANx.FlagSet indirection
+local function FSet(id, shift, mask, v)
+    local f = itemFlags[id] or 0
+    itemFlags[id] = f - lshift(band(rshift(f, shift), mask), shift) + lshift(band(v, mask), shift)
+end
+
 local cachesWarm = false   -- per-item filter caches walked once in the background
+local warmed = {}          -- [predicate] = true once swept for the whole universe
+                           -- (declared HERE so InvalidateAll clears this local
+                           -- and not a stray global - see minLvlCache history)
 local cacheDirty = false   -- structural data changed since the last export
 
 -- Bumped whenever anything that affects counts changes (filters, attunes,
@@ -48,24 +67,35 @@ function Engine.InvalidateStats()
     runsCache = {}
     pickCache = {}
     BumpRev()
+    -- a filter may have just been switched on that needs a predicate the
+    -- warmup skipped; top it up in the background (tag-deduped, so the
+    -- repeated calls from other invalidation paths cost nothing)
+    if Engine.WarmIfNeeded then Engine.WarmIfNeeded() end
 end
 
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
     srcCacheN = 0
-    if Engine.InvalidateQuestOnly then Engine.InvalidateQuestOnly() end
-    zexCache = {}
     limitedItemsSet = nil
     eventItemsCache = {}
     remainingCache = nil
     clearChanceCache = {}
     runsCache = {}
     pickCache = {}
-    questSideCache = {}
-    questCharCache = {}
-    minLvlCache = {}
+    -- clear the Engine-owned fields of the consolidated flag cache (quest
+    -- side/only/char-blocked, zone-exclusive, min level). Core's bind/
+    -- faction/accessory fields survive a data refresh exactly as their old
+    -- separate caches did; ForceRescan clears those too.
+    if ANx.FlagClearMask then
+        local m = bit.lshift(3, ANx.F_QSIDE) + bit.lshift(3, ANx.F_QONLY)
+            + bit.lshift(3, ANx.F_QCHAR) + bit.lshift(3, ANx.F_ZEX)
+            + bit.lshift(1023, ANx.F_MINLVL)
+        ANx.FlagClearMask(m)
+    end
     cachesWarm = false
+    warmed = {}            -- every predicate must be swept again
+    srcCacheCap = 3000     -- warmup re-runs; give it the big working set again
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -172,6 +202,14 @@ function Engine.ImportCache(provisional)
             ready = true,
         }
     end
+    if not provisional then
+        -- the arrays now live on as summaryCache sets; keeping the source
+        -- arrays in the db too held the same ~20k+ ids twice all session.
+        -- ExportCache rebuilds them from the live sets at scan-end and at
+        -- PLAYER_LOGOUT, so nothing is lost. (The provisional import keeps
+        -- them: the validated import at data-ready re-reads this table.)
+        sc.summaries = nil
+    end
     return true
 end
 
@@ -217,10 +255,11 @@ function Engine.YieldNow()
     end
 end
 
-pumpFrame:SetScript("OnUpdate", function()
+pumpFrame:SetScript("OnUpdate", function(self)
     local job = Engine.scanJobs[1]
     if not job then
         Engine.scanning = false
+        self:Hide()   -- sleep until the next Enqueue (OnUpdate needs shown)
         return
     end
     Engine.scanning = true
@@ -249,27 +288,8 @@ pumpFrame:SetScript("OnUpdate", function()
             -- levels). Counts render inline, and computing them against COLD
             -- caches is what froze the first open of every screen for
             -- seconds - warm, they are a cheap sweep of native calls.
-            if not cachesWarm then
-                Engine.Enqueue(function()
-                    local items = Engine.Universe()
-                    for _, id in ipairs(items) do
-                        Engine.MaybeYield()
-                        Engine.Sources(id)
-                        ANx.FactionAllowed(id)
-                        local known = Engine.ItemMinLevel(id) ~= nil
-                        -- only resolve bind for items the client has data for:
-                        -- scanning an uncached item would bake in "unknown"
-                        if ANx.BindType and (known or (ANx.ItemBind and ANx.ItemBind[id])) then
-                            ANx.BindType(id)
-                        end
-                        if ANx.IsAccessory then ANx.IsAccessory(id) end
-                        Engine.ItemQuestSide(id)
-                    end
-                    cachesWarm = true
-                    -- the per-item filter caches are built; the raw source
-                    -- arrays for the whole universe are no longer needed
-                    Engine.FlushSources()
-                end, function()
+            if not cachesWarm or Engine.WarmupIncomplete() then
+                Engine.Enqueue(Engine.WarmPredicates, function()
                     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
                 end, "warmup")
             end
@@ -278,10 +298,102 @@ pumpFrame:SetScript("OnUpdate", function()
                 Engine.PickAsync(nil, "btn")
             end
         end
-        if job.onDone then pcall(job.onDone) end
-        for _, cb in ipairs(job.extra or {}) do pcall(cb) end
+        if job.onDone then
+            local ok, err = pcall(job.onDone)
+            if not ok then ANx.ReportError("scan callback error: " .. tostring(err)) end
+        end
+        for _, cb in ipairs(job.extra or {}) do
+            local ok, err = pcall(cb)
+            if not ok then ANx.ReportError("scan callback error: " .. tostring(err)) end
+        end
     end
 end)
+
+-- ---------------------------------------------------------------------
+-- Filter-aware warmup
+-- ---------------------------------------------------------------------
+-- The background sweep exists so the first render of a screen isn't computing
+-- thousands of cold predicates inline. But Engine.Eligible only CONSULTS a
+-- predicate when the matching filter is active, and most are off by default -
+-- so warming all of them meant (for a default setup) thousands of wasted
+-- tooltip scans and source walks at every login. Warm what the current
+-- filters actually read; anything switched on later gets a top-up sweep.
+local function NeededPredicates()
+    local db = ANx.db or {}
+    return {
+        -- BindAllowed short-circuits unless a specific bind type is chosen
+        bind = (db.bindFilter or "both") ~= "both",
+        -- AccessoryAllowed short-circuits unless accessories are hidden
+        acc = db.accessories == false,
+        -- the quest-side test only runs under a one-faction filter
+        qside = (db.faction or "both") ~= "both",
+        -- min level is only read by the current-level gate
+        lvl = (ANx.LevelGate and (ANx.LevelGate("btn") or ANx.LevelGate("rec"))) or false,
+        zex = db.zoneExclusive == true,
+        -- "my quests" hiding applies under character scope
+        qchar = (db.scope ~= "account") and ((db.questClass or "mine") ~= "all"),
+    }
+end
+
+-- true when a filter now needs a predicate the last sweep skipped
+function Engine.WarmupIncomplete()
+    for pred, need in pairs(NeededPredicates()) do
+        if need and not warmed[pred] then return true end
+    end
+    return false
+end
+
+function Engine.WarmPredicates()
+    local need = NeededPredicates()
+    local items = Engine.Universe()
+    -- only sweep the predicates that are needed AND not already swept
+    local doBind = need.bind and not warmed.bind
+    local doAcc = need.acc and not warmed.acc
+    local doQSide = need.qside and not warmed.qside
+    local doLvl = need.lvl and not warmed.lvl
+    local doZex = need.zex and not warmed.zex
+    local doQChar = need.qchar and not warmed.qchar
+    local first = not cachesWarm
+    for _, id in ipairs(items) do
+        Engine.MaybeYield()
+        if first then
+            Engine.Sources(id)          -- everything downstream reads these
+            ANx.FactionAllowed(id)      -- no-op while the faction filter is off
+        end
+        if doLvl or doBind then
+            local known = Engine.ItemMinLevel(id) ~= nil
+            -- only resolve bind for items the client has data for:
+            -- scanning an uncached item would bake in "unknown"
+            if doBind and ANx.BindType and (known or (ANx.ItemBindSeed and ANx.ItemBindSeed(id))) then
+                ANx.BindType(id)
+            end
+        end
+        if doAcc and ANx.IsAccessory then ANx.IsAccessory(id) end
+        if doQSide then Engine.ItemQuestSide(id) end
+        if doQChar then Engine.ItemQuestCharBlocked(id) end
+        if doZex then Engine.IsZoneExclusive(id) end
+    end
+    if doBind then warmed.bind = true end
+    if doAcc then warmed.acc = true end
+    if doQSide then warmed.qside = true end
+    if doLvl then warmed.lvl = true end
+    if doZex then warmed.zex = true end
+    if doQChar then warmed.qchar = true end
+    cachesWarm = true
+    -- the per-item filter caches are built; the raw source arrays for the
+    -- whole universe are no longer needed
+    Engine.FlushSources()
+end
+
+-- A filter changed: if it needs a predicate we skipped, sweep it in the
+-- background rather than letting the next render compute it inline.
+function Engine.WarmIfNeeded()
+    if not cachesWarm then return end          -- the initial sweep covers it
+    if not Engine.WarmupIncomplete() then return end
+    Engine.Enqueue(Engine.WarmPredicates, function()
+        if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    end, "warmup")
+end
 
 function Engine.Enqueue(fn, onDone, tag)
     -- one job per tag: a second caller waiting on the same work gets its
@@ -298,6 +410,7 @@ function Engine.Enqueue(fn, onDone, tag)
         end
     end
     table.insert(Engine.scanJobs, { co = coroutine.create(fn), onDone = onDone, tag = tag })
+    pumpFrame:Show()
 end
 
 -- ---------------------------------------------------------------------
@@ -318,7 +431,7 @@ function Engine.Sources(itemId)
         -- fields each), so caching every item in a big DB burned hundreds of
         -- MB. Filters/counts use the small derived caches, not this - only
         -- the items actually viewed/ranked need their raw sources.
-        if srcCacheN >= SRC_CACHE_CAP then
+        if srcCacheN >= srcCacheCap then
             srcCache = {}
             srcCacheN = 0
         end
@@ -330,38 +443,41 @@ function Engine.Sources(itemId)
 end
 
 -- Drop the raw-source working set (rebuilds on demand). Called once the
--- background warm-up has distilled everything into the small filter caches.
+-- background warm-up has distilled everything into the small filter caches;
+-- after that only viewed/ranked items need raw sources, so a smaller working
+-- set suffices (ClearChance results are memoized separately).
 function Engine.FlushSources()
     srcCache = {}
     srcCacheN = 0
+    srcCacheCap = 800
 end
 
 -- true when EVERY source of the item is a quest reward (can't be forged)
-local questOnlyCache = {}
 function Engine.IsQuestOnly(itemId)
-    local v = questOnlyCache[itemId]
-    if v == nil then
-        local srcs = Engine.Sources(itemId)
-        if #srcs == 0 then
-            v = false
-        else
-            v = true
-            for _, src in ipairs(srcs) do
-                if src.srcType ~= ANx.SRC.QUEST then v = false break end
-            end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, F_QONLY), 3) or 0
+    if c ~= 0 then return c == 2 end
+    local v
+    local srcs = Engine.Sources(itemId)
+    if #srcs == 0 then
+        v = false
+    else
+        v = true
+        for _, src in ipairs(srcs) do
+            if src.srcType ~= ANx.SRC.QUEST then v = false break end
         end
-        questOnlyCache[itemId] = v
     end
+    FSet(itemId, F_QONLY, 3, v and 2 or 1)
     return v
 end
 function Engine.InvalidateQuestOnly()
-    questOnlyCache = {}
+    ANx.FlagClearAll(ANx.F_QONLY, 3)
 end
 
-local function ZoneNameMatch(a, b)
-    if not a or not b then return false end
-    return a:lower() == b:lower()
-end
+-- (Zone-name comparisons now use the pre-lowered s.zoneLower field that
+-- ANx.GetSources stamps on every source record: the old ZoneNameMatch
+-- helper allocated two fresh lowered strings per comparison inside the
+-- per-item hot loops.)
 
 -- Every zone name the addon knows, lowercased. Used to tell an English client
 -- (source zoneNames are recognizable) from a localized one (they are not).
@@ -391,17 +507,20 @@ end
 
 function Engine.BestSource(itemId, zoneName, srcFilter)
     local best, bestAny, bestBlocked, bestAnyBlocked
+    -- lower the target once; records carry zoneLower (set in ANx.GetSources)
+    local zTarget = zoneName and zoneName:lower()
     for _, s in ipairs(Engine.Sources(itemId)) do
         local typeOk = (not srcFilter) or srcFilter[s.srcType]
         if typeOk then
+            local zoneHit = zTarget ~= nil and (s.zoneLower or "") == zTarget
             if SourceUsable(s) then
                 if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
-                if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
+                if zoneHit then
                     if (not best) or s.chance > best.chance then best = s end
                 end
             else
                 if (not bestAnyBlocked) or s.chance > bestAnyBlocked.chance then bestAnyBlocked = s end
-                if zoneName and ZoneNameMatch(s.zoneName, zoneName) then
+                if zoneHit then
                     if (not bestBlocked) or s.chance > bestBlocked.chance then bestBlocked = s end
                 end
             end
@@ -465,10 +584,11 @@ end
 -- specific zone). Used by the World Drops "Rares only" filter.
 function Engine.ItemHasRareSource(itemId, zoneName)
     if not ANx.RareNPCs then return false end
+    local zTarget = zoneName and zoneName:lower()
     for _, s in ipairs(Engine.Sources(itemId)) do
         if (s.srcType == ANx.SRC.CREATURE or s.srcType == ANx.SRC.MYTHIC_CREATURE)
             and s.objId and ANx.RareNPCs[s.objId] then
-            if not zoneName or ZoneNameMatch(s.zoneName, zoneName) then
+            if not zTarget or (s.zoneLower or "") == zTarget then
                 return true
             end
         end
@@ -489,11 +609,12 @@ end
 -- Considers named zones only; empty/Unknown source zones are ignored.
 function Engine.ItemIsUniqueToZone(itemId, zoneName)
     if not zoneName then return true end
+    local zTarget = zoneName:lower()
     local inThisZone = false
     for _, s in ipairs(Engine.Sources(itemId)) do
         local zn = s.zoneName
         if zn and zn ~= "" and zn ~= "Unknown" and zn ~= "?" then
-            if ZoneNameMatch(zn, zoneName) then
+            if s.zoneLower == zTarget then
                 inThisZone = true
             else
                 return false   -- found a source in a different zone
@@ -514,8 +635,9 @@ end
 -- Global zone-exclusivity: does the item drop in exactly ONE named zone?
 -- (For an item in a node's set this is equivalent to "unique to this node".)
 function Engine.IsZoneExclusive(itemId)
-    local c = zexCache[itemId]
-    if c ~= nil then return c end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, F_ZEX), 3) or 0
+    if c ~= 0 then return c == 2 end
     local zone, multiple = nil, false
     for _, s in ipairs(Engine.Sources(itemId)) do
         local zn = s.zoneName
@@ -524,9 +646,9 @@ function Engine.IsZoneExclusive(itemId)
             elseif zone ~= zn:lower() then multiple = true break end
         end
     end
-    c = (zone ~= nil) and (not multiple)
-    zexCache[itemId] = c
-    return c
+    local v = (zone ~= nil) and (not multiple)
+    FSet(itemId, F_ZEX, 3, v and 2 or 1)
+    return v
 end
 
 -- Shared item eligibility for counting/listing: character/account can attune it,
@@ -534,22 +656,25 @@ end
 -- For quest-only items: the one faction whose quests reward it, or nil if
 -- any of its quests are neutral / doable by both (or it has other sources).
 function Engine.ItemQuestSide(itemId)
-    local c = questSideCache[itemId]
-    if c ~= nil then return c or nil end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, F_QSIDE), 3) or 0
+    if c ~= 0 then return (c == 2 and "A") or (c == 3 and "H") or nil end
     if not Engine.IsQuestOnly(itemId) then
-        questSideCache[itemId] = false
+        FSet(itemId, F_QSIDE, 3, 1)
         return nil
     end
     local side
     for _, src in ipairs(Engine.Sources(itemId)) do
         if src.srcType == ANx.SRC.QUEST then
             local qs = ANx.QuestFactionSide(src.objId)
-            if not qs then questSideCache[itemId] = false return nil end
-            if side and side ~= qs then questSideCache[itemId] = false return nil end
+            if not qs or (side and side ~= qs) then
+                FSet(itemId, F_QSIDE, 3, 1)
+                return nil
+            end
             side = qs
         end
     end
-    questSideCache[itemId] = side or false
+    FSet(itemId, F_QSIDE, 3, side == "A" and 2 or side == "H" and 3 or 1)
     return side
 end
 
@@ -557,8 +682,9 @@ end
 -- (class- or race-locked): the item can be attunable yet unreachable, like
 -- the role rings behind class-locked quest trios.
 function Engine.ItemQuestCharBlocked(itemId)
-    local c = questCharCache[itemId]
-    if c ~= nil then return c end
+    local f = itemFlags[itemId]
+    local c = f and band(rshift(f, F_QCHAR), 3) or 0
+    if c ~= 0 then return c == 2 end
     local blocked = false
     if Engine.IsQuestOnly(itemId) then
         blocked = true
@@ -569,7 +695,7 @@ function Engine.ItemQuestCharBlocked(itemId)
             end
         end
     end
-    questCharCache[itemId] = blocked
+    FSet(itemId, F_QCHAR, 3, blocked and 2 or 1)
     return blocked
 end
 
@@ -635,9 +761,8 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
         -- back to the item's own source types.
         local matchedThisZone, recognized = false, false
         for _, s in ipairs(sources) do
-            local zn = s.zoneName
-            if zn and zn ~= "" then
-                local zl = zn:lower()
+            local zl = s.zoneLower
+            if zl and zl ~= "" then
                 if zl == zLower then matchedThisZone = true end
                 if known[zl] then recognized = true end
             end
@@ -645,8 +770,10 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
         local fallback = (not matchedThisZone) and (not recognized)
         local isQuest, isWorld, isVendor = false, false, false
         for _, s in ipairs(sources) do
-            if fallback or ZoneNameMatch(s.zoneName, zoneEntry.name) then
-                if s.srcType == ANx.SRC.QUEST then
+            if fallback or s.zoneLower == zLower then
+                -- a quest row with no objId would make questsById[nil] raise
+                -- inside the summary coroutine and wedge the whole scan
+                if s.srcType == ANx.SRC.QUEST and s.objId then
                     isQuest = true
                     local q = questsById[s.objId]
                     if not q then
@@ -655,6 +782,8 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
                         zc.questList[#zc.questList + 1] = q
                     end
                     q.items[#q.items + 1] = itemId
+                elseif s.srcType == ANx.SRC.QUEST then
+                    isQuest = true   -- unclassifiable quest row: count, don't index
                 elseif s.srcType == ANx.SRC.VENDOR then
                     isVendor = true
                     local list = zc.vendorByName[s.objName]
@@ -774,12 +903,14 @@ function Engine.ProfessionEntries(prof, exp)
     c = {}
     local dbReady = ANx.LootDbLoaded()
     local rows = ANx.ProfessionItems and ANx.ProfessionItems[prof]
-    if rows then
-        for _, row in ipairs(rows) do
-            local itemId, spellId, skill, rowExp = row[1], row[2], row[3], row[4]
-            if rowExp == exp and ANx.IsAttunableAtAll(itemId)
+    if rows and rows.ids then
+        -- parallel arrays: same index across ids/spells/skills/exps
+        local ids, spells, skills, exps = rows.ids, rows.spells, rows.skills, rows.exps
+        for i = 1, #ids do
+            local itemId = ids[i]
+            if exps[i] == exp and ANx.IsAttunableAtAll(itemId)
                 and Engine.IsCraftObtained(itemId) then
-                c[#c + 1] = { id = itemId, spell = spellId, skill = skill }
+                c[#c + 1] = { id = itemId, spell = spells[i], skill = skills[i] }
             end
         end
         table.sort(c, function(a, b) return a.skill < b.skill end)
@@ -1192,17 +1323,18 @@ function Engine.FilterAffordable(items)
     return out
 end
 
--- Static costs from Data_VendorCosts.lua, decoded to { {name=,count=}, ... } variants
+-- Static costs from Data_VendorCosts.lua (packed "cur:count,cur:count|..."
+-- variant strings), decoded to { {name=,count=}, ... } variants
 local function StaticCosts(itemId)
     local raw = ANx.VendorCosts and ANx.VendorCosts[itemId]
     if not raw then return nil end
     local out = {}
-    for _, v in ipairs(raw) do
+    for variant in raw:gmatch("[^|]+") do
         local cost = {}
-        for i = 1, #v - 1, 2 do
+        for idx, count in variant:gmatch("(%d+):(%d+)") do
             cost[#cost + 1] = {
-                name = (ANx.VendorCurrencyNames and ANx.VendorCurrencyNames[v[i]]) or "?",
-                count = v[i + 1],
+                name = (ANx.VendorCurrencyNames and ANx.VendorCurrencyNames[tonumber(idx)]) or "?",
+                count = tonumber(count),
             }
         end
         if #cost > 0 then out[#out + 1] = cost end
@@ -1417,7 +1549,7 @@ function Engine.PerfStats()
     return {
         lua_kb = math.floor(collectgarbage("count")),
         srcCache = count(srcCache),
-        srcCap = SRC_CACHE_CAP,
+        srcCap = srcCacheCap,
         runsKeys = count(runsCache),
         pickKeys = count(pickCache),
         clearChance = count(clearChanceCache),
@@ -1579,18 +1711,6 @@ function Engine.ItemBestDropChance(itemId)
     return best
 end
 
--- reverse profession lookup (itemId -> profession), built lazily
-local profOfItem
-local function ProfessionOf(itemId)
-    if not profOfItem then
-        profOfItem = {}
-        for prof, rows in pairs(ANx.ProfessionItems or {}) do
-            for _, row in ipairs(rows) do profOfItem[row[1]] = prof end
-        end
-    end
-    return profOfItem[itemId]
-end
-
 -- "node" bucket key for the focus-most-left option: which zone / instance /
 -- profession / currency an item primarily belongs to.
 function Engine.ItemBucket(itemId)
@@ -1599,7 +1719,7 @@ function Engine.ItemBucket(itemId)
         local costs = Engine.ItemCurrencies(itemId)
         return "$" .. ((costs and costs[1] and costs[1].name) or "Vendor")
     elseif srcType == ANx.SRC.CRAFT_TRAINER or srcType == ANx.SRC.CRAFT_RECIPE then
-        return "@" .. (ProfessionOf(itemId) or "Crafting")
+        return "@" .. (ANx.ProfessionOfItem(itemId) or "Crafting")
     end
     if zone and zone ~= "" and zone ~= "Unknown" then return "#" .. zone end
     return "#" .. (srcName or "Unknown")
@@ -1619,20 +1739,22 @@ end
 -- nil = the client cannot say (item info unavailable). The level gate treats
 -- that as "does not pass": an item we cannot verify must not be recommended,
 -- or uncached high-level vendor stock slips straight through the filter.
-local minLvlCache = {}
+-- Cached in the consolidated flag table (0 unknown, 1 can't-say, else lvl+2).
 function Engine.ItemMinLevel(id)
-    local c = minLvlCache[id]
-    if c ~= nil then
-        if c == false then return nil end
-        return c
+    local f = itemFlags[id]
+    local c = f and band(rshift(f, F_MINLVL), 1023) or 0
+    if c ~= 0 then
+        if c == 1 then return nil end
+        return c - 2
     end
     local name, _, _, _, minLvl = (_G.GetItemInfoCustom or _G.GetItemInfo or function() end)(id)
     if name == nil and minLvl == nil then
-        minLvlCache[id] = false      -- unknown to the client (so far)
+        FSet(id, F_MINLVL, 1023, 1)   -- unknown to the client (so far)
         return nil
     end
     local v = tonumber(minLvl) or 0
-    minLvlCache[id] = v
+    if v < 0 then v = 0 elseif v > 1000 then v = 1000 end
+    FSet(id, F_MINLVL, 1023, v + 2)
     return v
 end
 
@@ -1751,7 +1873,18 @@ end
 -- render: results are cached per screen (and per revision) and computed on
 -- the background pump. false = computed, nothing to recommend.
 local function PickKey(view, which)
-    return (which or "btn") .. "|" .. (view and tostring(view) or "global")
+    if not view then return (which or "btn") .. "|global" end
+    -- content-derived key: a fresh view TABLE is pushed on every navigation,
+    -- so the old tostring(view) address key could never hit on a revisit and
+    -- re-ran the full background pick per screen. items-views key on their
+    -- item list's identity (same view object -> same list -> cache hit).
+    return (which or "btn") .. "|" .. (view.type or "")
+        .. ":" .. tostring(view.exp or "")
+        .. ":" .. tostring(view.kind or view.content or "")
+        .. ":" .. tostring(view.mode or "")
+        .. ":" .. tostring(view.zoneEntry and view.zoneEntry.zone or "")
+        .. ":" .. tostring(view.itemId or view.questId or "")
+        .. ":" .. (view.items and tostring(view.items) or "")
 end
 
 function Engine.PickCached(view, which)
@@ -1789,7 +1922,9 @@ end
 local SPAWN_CAP = 60      -- sanity cap: nobody clears more than this of one mob
 
 function Engine.SpawnCount(objId)
-    local n = objId and ANx.MobCount and ANx.MobCount[objId]
+    -- MobCountPacked: sorted hex records, counts pre-capped (Data_MobCounts)
+    local n = objId and ANx.MobCountPacked
+        and ANx.PackedFind(ANx.MobCountPacked, objId, 2)
     if not n or n < 1 then return 1 end
     if n > SPAWN_CAP then return SPAWN_CAP end
     return n
