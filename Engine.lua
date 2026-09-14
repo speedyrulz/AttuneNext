@@ -699,8 +699,43 @@ function Engine.ItemQuestCharBlocked(itemId)
     return blocked
 end
 
+-- ---------------------------------------------------------------------
+-- "Hide in bags": items the character already carries (bags, bank, or
+-- equipped) - looted, waiting to be attuned, no longer worth chasing.
+-- ---------------------------------------------------------------------
+-- Equipped items are not counted by GetItemCount on 3.3.5, so the 19
+-- inventory slots are read once per pass and cached until the next
+-- bag / equipment event.
+local equippedSet
+local function EquippedSet()
+    if equippedSet then return equippedSet end
+    equippedSet = {}
+    if _G.GetInventoryItemLink then
+        for slot = 1, 19 do
+            local ok, link = pcall(_G.GetInventoryItemLink, "player", slot)
+            local id = ok and link and tonumber(link:match("item:(%d+)"))
+            if id then equippedSet[id] = true end
+        end
+    end
+    return equippedSet
+end
+
+function Engine.InvalidateOwned()
+    equippedSet = nil
+end
+
+function Engine.IsOwned(itemId)
+    if EquippedSet()[itemId] then return true end
+    if _G.GetItemCount then
+        local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
+        if ok and type(c) == "number" and c > 0 then return true end
+    end
+    return false
+end
+
 function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
+    if ANx.db and ANx.db.hideInBags and Engine.IsOwned(itemId) then return false end
     -- an item ONLY obtainable from the other faction's quests is as
     -- faction-locked as any Alliance-only drop, even without an item flag
     local fac = ANx.db and ANx.db.faction
@@ -937,6 +972,7 @@ function Engine.ScopeLeft(itemId, scope)
         if ANx.AccountHasVariant(itemId) then return false end
     end
     if not ANx.FactionAllowed(itemId) then return false end
+    if ANx.db and ANx.db.hideInBags and Engine.IsOwned(itemId) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end

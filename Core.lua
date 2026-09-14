@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.6.0"
+ANx.VERSION = "3.6.1"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -162,6 +162,7 @@ local defaults = {
     faction = "both",     -- "both", "A" (Alliance), or "H" (Horde)
     raresOnly = false,    -- World Drops: only items that drop from rare spawns
     zoneExclusive = false,-- global: only count/show items found in a single zone
+    hideInBags = false,   -- global: hide items you already carry (bags, bank, equipped)
     forge = 1,            -- Forge Level (1 Attunable, 2 TF, 3 WF, 4 LF)
     classicSkin = false,  -- true = "unskinned" look (no painted art pack)
     browseWinPos = nil,   -- saved position of the simple browse window
@@ -237,7 +238,7 @@ end
 -- ONE shared implementation: the two "reset filters" buttons each carried
 -- their own (different, both incomplete) key lists.
 local FILTER_RESET_KEYS = {
-    "scope", "faction", "forge", "zoneExclusive", "stockFilter", "vendorFilter",
+    "scope", "faction", "forge", "zoneExclusive", "hideInBags", "stockFilter", "vendorFilter",
     "raresOnly", "questClass", "classFilter", "bindFilter", "accessories",
     "difficulty", "raidSize", "affordableOnly",
 }
@@ -1586,6 +1587,7 @@ eventFrame:RegisterEvent("TRADE_SKILL_SHOW")
 eventFrame:RegisterEvent("TRADE_SKILL_UPDATE")
 eventFrame:RegisterEvent("BAG_UPDATE")
 eventFrame:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
+eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 eventFrame:RegisterEvent("LOOT_OPENED")
 eventFrame:RegisterEvent("START_LOOT_ROLL")
 eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
@@ -1728,9 +1730,26 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant) end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         if ANx.QueueTradeSkillScan then ANx.QueueTradeSkillScan() end
-    elseif event == "BAG_UPDATE" or event == "PLAYERBANKSLOTS_CHANGED" then
+    elseif event == "BAG_UPDATE" or event == "PLAYERBANKSLOTS_CHANGED"
+        or event == "PLAYER_EQUIPMENT_CHANGED" then
         -- the What's Left materials screen nets out your stock; keep it fresh
-        if ANx.UI and ANx.UI.RefreshMats then ANx.UI.RefreshMats() end
+        if event ~= "PLAYER_EQUIPMENT_CHANGED" and ANx.UI and ANx.UI.RefreshMats then
+            ANx.UI.RefreshMats()
+        end
+        -- with "Hide in bags" on, what you carry IS a filter: recount once the
+        -- burst of bag events settles (looting fires one per stack moved)
+        if ANx.db and ANx.db.hideInBags and ANx.Engine then
+            ANx.Engine.InvalidateOwned()
+            if not ANx.ownedRefreshPending then
+                ANx.ownedRefreshPending = true
+                ANx.After(0.5, function()
+                    ANx.ownedRefreshPending = nil
+                    ANx.Engine.InvalidateOwned()
+                    ANx.Engine.InvalidateStats()
+                    if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+                end)
+            end
+        end
     elseif event == "LOOT_OPENED" then
         if ANx.CheckLootWindow then ANx.CheckLootWindow() end
     elseif event == "START_LOOT_ROLL" then

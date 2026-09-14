@@ -968,6 +968,14 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
+    f.bagsBtn = Chip("AttuneNextBagsBtn", "stock", "Hide items in bags",
+        "Hide items you already carry (bags, bank, or equipped) but haven't attuned yet - you've looted them, so there's nothing left to chase.", function()
+        ANx.db.hideInBags = not ANx.db.hideInBags
+        Engine.InvalidateOwned()
+        Engine.InvalidateStats()
+        UI.Render()
+    end)
+
     f.classBtn = Chip("AttuneNextClassBtn", "character", "Class filter (Prestige)",
         "Cycle which class's gear is shown. Unlocked by Prestige mode in Options.", function()
         local order = ANx.CLASS_ORDER
@@ -1937,7 +1945,7 @@ function UI.CycleSearchType()
 end
 
 -- ---- favorites -------------------------------------------------------
-local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "bindFilter",
+local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "hideInBags", "bindFilter",
     "accessories", "difficulty", "raidSize", "raresOnly", "vendorFilter", "questClass",
     "stockFilter", "affordableOnly", "classFilter" }
 
@@ -1954,6 +1962,7 @@ local function FilterSummary(f)
     if f.faction == "A" then p[#p + 1] = "Alliance" elseif f.faction == "H" then p[#p + 1] = "Horde" end
     if (f.forge or 1) > 1 then p[#p + 1] = "Forge " .. (ANx.FORGE_LABELS[f.forge] or f.forge) end
     if f.zoneExclusive then p[#p + 1] = "Zone-exclusive" end
+    if f.hideInBags then p[#p + 1] = "Not in bags" end
     if f.bindFilter == "bop" then p[#p + 1] = "BoP" elseif f.bindFilter == "boe" then p[#p + 1] = "BoE" end
     if f.accessories == false then p[#p + 1] = "No accessories" end
     if f.difficulty and f.difficulty ~= "all" then p[#p + 1] = (ANx.DIFF_TIER_LABELS[f.difficulty] or f.difficulty) end
@@ -3294,6 +3303,8 @@ builders["items"] = function(view)
             AddRow({ text = "|cff888888No " .. ANx.db.stockFilter .. "-stock items here (change the Stock filter)|r" })
         elseif ANx.db.zoneExclusive then
             AddRow({ text = "|cff888888Nothing zone-exclusive left here (toggle 'Zone-exclusive only' off to see all)|r" })
+        elseif ANx.db.hideInBags then
+            AddRow({ text = "|cff888888Everything left here is already in your bags (set 'In bags' to Show to see them)|r" })
         elseif view.worldDrop and ANx.db.raresOnly then
             AddRow({ text = "|cff888888No rare-spawn world drops left here (toggle 'Rare spawns only' off to see all)|r" })
         elseif ANx.ForgeLevel() <= 1 then
@@ -3956,6 +3967,8 @@ function UI.Render()
         and "Accessories On" or "Accessories Off") .. "|r")
     SetChip(f.zexBtn, "zone_exclusive", "|cffff9d45" .. (ANx.db.zoneExclusive
         and "Zone-excl. On" or "Zone-excl. Off") .. "|r")
+    SetChip(f.bagsBtn, "stock", ANx.db.hideInBags
+        and "|cffff8080In bags: Hide|r" or "|cffd8c8a8In bags: Show|r")
     if ANx.db.prestige then
         local cf = ANx.db.classFilter or "all"
         SetChip(f.classBtn, "character", (cf == "all") and "|cffd8c8a8Class: All|r"
@@ -4437,6 +4450,10 @@ function UI.FilterDefs(view)
     end
     add("Zone-excl: " .. (ANx.db.zoneExclusive and "On" or "Off"), function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
+    end)
+    add("In bags: " .. (ANx.db.hideInBags and "Hide" or "Show"), function()
+        ANx.db.hideInBags = not ANx.db.hideInBags
+        Engine.InvalidateOwned()
     end)
     if ViewHasDifficulty(view) then
         local d = ANx.db.difficulty or "all"
