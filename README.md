@@ -181,6 +181,11 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v3.6.2**
+
+- Fixed an out-of-memory crash at login ("Not enough memory resources", with *Universe* named as the current function). The background scan rebuilds every item's source list, and world-drop items can list thousands of creatures. The source cache was capped by item count only, so it could hold millions of records, and the scan's short-lived garbage was left to pile up. The cache is now capped by record count too, a redundant pre-load of every item's sources was removed, and the collector gets a small step each scan frame. In testing this roughly halved peak memory during login.
+- Running AttuneNext and AttuneNext-Simple together scans the loot database twice. They work side by side, but if you only use one, disabling the other saves a lot of memory.
+
 **v3.6.1**
 
 - Added an **In bags: Show / Hide** toggle (toolbar chip and right-click filter menu). Set to Hide, it drops items you already have in your bags, bank, or equipped from every list, count, recommendation and nameplate filter — they're looted, they just aren't attuned yet. Refreshes automatically on loot, bank and equipment changes. Requested by a user who couldn't find such an option.

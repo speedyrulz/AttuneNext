@@ -15,11 +15,17 @@ local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
 local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
 local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
 local srcCacheN     = 0    -- entries in srcCache
+local srcCacheRows  = 0    -- source records held across all cached entries
 local srcCacheCap   = 3000 -- flush past this: source arrays are heavy (~8 named
                            -- fields per record) and only a handful of items are
                            -- ever viewed at once. Big while the warmup sweeps;
                            -- FlushSources lowers it once the derived predicate
                            -- caches are filled (~1+ MB steady-state saved)
+-- The item cap alone is not a memory bound: a world-drop item can list
+-- thousands of creatures, so 3000 such items held millions of record tables
+-- and pushed the 32-bit client past its 2 GB limit at login. Budget the
+-- cache by RECORDS too; an item bigger than the whole budget is never cached.
+local SRC_ROW_BUDGET = 60000
 local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
 local eventItemsCache = {} -- [eventName]     -> { itemIds }
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
@@ -76,7 +82,7 @@ end
 function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
-    srcCacheN = 0
+    srcCacheN, srcCacheRows = 0, 0
     limitedItemsSet = nil
     eventItemsCache = {}
     remainingCache = nil
@@ -230,6 +236,7 @@ Engine.scanJobs = {}
 Engine.scanning = false
 local pumpFrame = CreateFrame("Frame")
 local BUDGET_MS = 10
+local GC_STEP_KB = 2048   -- collector work per scan frame (see the pump)
 
 local function Clock()
     if debugprofilestop then return debugprofilestop() end
@@ -272,6 +279,11 @@ pumpFrame:SetScript("OnUpdate", function(self)
             break
         end
     end
+    -- A scan churns through millions of short-lived source records. Left to
+    -- its default pacing, Lua's collector let that garbage pile up to several
+    -- times the live data during login; a small step per scan frame keeps it
+    -- bounded (cheap: only runs while a background job is active).
+    collectgarbage("step", GC_STEP_KB)
     if coroutine.status(job.co) == "dead" then
         table.remove(Engine.scanJobs, 1)
         if #Engine.scanJobs == 0 then
@@ -356,8 +368,11 @@ function Engine.WarmPredicates()
     local first = not cachesWarm
     for _, id in ipairs(items) do
         Engine.MaybeYield()
+        -- (no Engine.Sources pre-fill here: the universe is far larger than
+        -- the bounded source cache, so pre-loading every item just built and
+        -- threw away every source record a second time; the predicates
+        -- below fetch what they need themselves)
         if first then
-            Engine.Sources(id)          -- everything downstream reads these
             ANx.FactionAllowed(id)      -- no-op while the faction filter is off
         end
         if doLvl or doBind then
@@ -431,13 +446,17 @@ function Engine.Sources(itemId)
         -- fields each), so caching every item in a big DB burned hundreds of
         -- MB. Filters/counts use the small derived caches, not this - only
         -- the items actually viewed/ranked need their raw sources.
-        if srcCacheN >= srcCacheCap then
-            srcCache = {}
-            srcCacheN = 0
-        end
         s = ANx.GetSources(itemId)
-        srcCache[itemId] = s
-        srcCacheN = srcCacheN + 1
+        local rows = #s
+        if rows <= SRC_ROW_BUDGET then
+            if srcCacheN >= srcCacheCap or srcCacheRows + rows > SRC_ROW_BUDGET then
+                srcCache = {}
+                srcCacheN, srcCacheRows = 0, 0
+            end
+            srcCache[itemId] = s
+            srcCacheN = srcCacheN + 1
+            srcCacheRows = srcCacheRows + rows
+        end
     end
     return s
 end
@@ -448,7 +467,7 @@ end
 -- set suffices (ClearChance results are memoized separately).
 function Engine.FlushSources()
     srcCache = {}
-    srcCacheN = 0
+    srcCacheN, srcCacheRows = 0, 0
     srcCacheCap = 800
 end
 
