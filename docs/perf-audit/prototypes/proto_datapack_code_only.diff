@@ -1,0 +1,212 @@
+--- a/Core.lua
++++ b/Core.lua
+@@ -390,6 +390,29 @@
+     return nil
+ end
+ 
++-- Static reagent list of a crafted item (Data_Reagents): ReagentsPacked is a
++-- sorted index of 4 hex craftedId + 5 hex 1-based position into ReagentBlob
++-- + 1 hex reagent count; the blob holds 6-char records of 4 hex reagentId +
++-- 2 hex count. Returns a NEW { rid1, n1, rid2, n2, ... } array or nil when the
++-- item is not craftable; Engine.ReagentsOf memoizes it. The old [id]={...}
++-- hash kept 2,847 subtables resident (~380 KB on the 32-bit client) for a
++-- report-time read.
++function ANx.StaticReagents(itemId)
++    local idx = ANx.ReagentsPacked
++    local v = idx and itemId and ANx.PackedFind(idx, itemId, 6)
++    if not v then return nil end
++    local n = v % 16
++    local p = (v - n) / 16
++    local blob, out = ANx.ReagentBlob, {}
++    for i = 1, n do
++        local c1, c2, c3, c4, c5, c6 = strbyte(blob, p, p + 5)
++        out[2 * i - 1] = HEXV[c1] * 4096 + HEXV[c2] * 256 + HEXV[c3] * 16 + HEXV[c4]
++        out[2 * i] = HEXV[c5] * 16 + HEXV[c6]
++        p = p + 6
++    end
++    return out
++end
++
+ -- ---------------------------------------------------------------------
+ -- Consolidated per-item flag cache.
+ -- The per-item predicate caches (bind, faction, accessory, quest-side,
+@@ -1230,10 +1253,29 @@
+     return i and ANx.QuestClassMasks and ANx.QuestClassMasks[i] or nil
+ end
+ 
+--- Decode a QuestGivers value ("zoneAreaId:x10:y10:name", Data_QuestGivers)
++-- Quest giver of a quest (Data_QuestGivers): QuestGiversPacked is a sorted
++-- index of 4 hex questId + 5 hex 1-based position into QuestGiverBlob, whose
++-- records are 4 hex zoneAreaId, 3 hex x10, 3 hex y10, the giver name, "\n".
++-- Dropped-item starters that Questie has no giver for are merged in by
++-- Data_QuestItemStarts as old-style "zone:x10:y10:name" strings in
++-- ANx.QuestGiversExtra (checked second, matching the old merge precedence).
+ -- -> zoneAreaId, x*10, y*10, giverName. nil when the quest has no giver.
++local strfind, strsub = string.find, string.sub
+ function ANx.QuestGiver(qid)
+-    local e = ANx.QuestGivers and ANx.QuestGivers[qid]
++    local idx = ANx.QuestGiversPacked
++    local p = idx and qid and ANx.PackedFind(idx, qid, 5)
++    if p then
++        local blob = ANx.QuestGiverBlob
++        local b1, b2, b3, b4, b5, b6, b7, b8, b9, b10 = strbyte(blob, p, p + 9)
++        local zone = HEXV[b1] * 4096 + HEXV[b2] * 256 + HEXV[b3] * 16 + HEXV[b4]
++        local x = HEXV[b5] * 256 + HEXV[b6] * 16 + HEXV[b7]
++        local y = HEXV[b8] * 256 + HEXV[b9] * 16 + HEXV[b10]
++        local e = strfind(blob, "\n", p + 10, true)
++        local name = strsub(blob, p + 10, e - 1)
++        if name == "" then name = nil end
++        return zone, x, y, name
++    end
++    local e = ANx.QuestGiversExtra and ANx.QuestGiversExtra[qid]
+     if not e then return nil end
+     local zone, x, y, name = e:match("^(%d+):(%d+):(%d+):(.*)$")
+     if not zone then return nil end
+@@ -1241,6 +1283,16 @@
+     return tonumber(zone), tonumber(x), tonumber(y), name
+ end
+ 
++-- true when a giver location is known for the quest (= a waypoint arrow can
++-- be set); one packed probe, no decode.
++function ANx.HasQuestGiver(qid)
++    if not qid then return false end
++    local idx = ANx.QuestGiversPacked
++    if idx and ANx.PackedFind(idx, qid, 5) then return true end
++    local x = ANx.QuestGiversExtra
++    return (x and x[qid]) ~= nil
++end
++
+ -- Decode a VendorLocs value ("zoneAreaId:x10:y10", Data_VendorLocs)
+ -- -> zoneAreaId, x*10, y*10.
+ function ANx.VendorLoc(npcId)
+--- a/Engine.lua
++++ b/Engine.lua
+@@ -1121,10 +1121,27 @@
+ 
+ -- Reagent list for a crafted item: a live profession-window scan wins (server
+ -- truth, covers Synastria custom recipes), else the built-in 3.3.5 craft data.
++-- The built-in data is packed (Data_Reagents) and decoded by
++-- ANx.StaticReagents (a binary search, ~13 string probes, where the old hash
++-- hit cost one). A What's Left report asks for the same few hundred ids
++-- thousands of times (5,204 calls in the harness), so decoded lists are
++-- memoized here as read-only shared arrays - like the old static table, but
++-- only for the ids a report reaches; misses (raw materials) memoize as false.
++-- Wiped when it outgrows STATIC_RG_MAX entries (~110 KB of hash on the 32-bit
++-- client), well below the old always-resident table.
++local staticRg, staticRgN = {}, 0
++local STATIC_RG_MAX = 4096
+ function Engine.ReagentsOf(itemId)
+     local rg = ANx.db and ANx.db.reagents and ANx.db.reagents[itemId]
+     if rg then return rg end
+-    return ANx.Reagents and ANx.Reagents[itemId] or nil
++    rg = staticRg[itemId]
++    if rg == nil then
++        rg = ANx.StaticReagents(itemId) or false
++        if staticRgN >= STATIC_RG_MAX then staticRg = {}; staticRgN = 0 end
++        staticRg[itemId] = rg
++        staticRgN = staticRgN + 1
++    end
++    return rg or nil
+ end
+ 
+ -- Items produced per craft (e.g. one smelt yields 2 Bronze Bars). Follows the
+--- a/QuestArrow.lua
++++ b/QuestArrow.lua
+@@ -80,13 +80,21 @@
+ --           "chain_inlog"          (a prerequisite is already in the log)
+ --           "unknown"              (no completed-quest data yet)
+ -- ---------------------------------------------------------------------
+--- QuestPre rows ship as packed "minLevel:parent:mode:p1:p2..." strings
+--- (Data_QuestGivers). Decode into ONE reusable scratch table - the resolver
+--- only ever inspects a single row at a time, so no allocation per hop.
++-- QuestPre rows ship packed (Data_QuestGivers): QuestPrePacked is a sorted
++-- index of 4 hex questId + 5 hex 1-based position into QuestPreBlob, where
++-- each row is "minLevel:parent:mode:p1:p2...\n". Decode into ONE reusable
++-- scratch table - the resolver only ever inspects a single row at a time.
++local strfind, strsub, strmatch = string.find, string.sub, string.match
++local function PreRowStart(qid)
++    local idx = ANx.QuestPrePacked
++    return idx and qid and ANx.PackedFind(idx, qid, 5)
++end
+ local preScratch = {}
+ local function PreRow(qid)
+-    local s = ANx.QuestPre and ANx.QuestPre[qid]
+-    if not s then return nil end
++    local p = PreRowStart(qid)
++    if not p then return nil end
++    local blob = ANx.QuestPreBlob
++    local s = strsub(blob, p, strfind(blob, "\n", p, true) - 1)
+     local n = 0
+     for num in s:gmatch("%-?%d+") do
+         n = n + 1
+@@ -142,7 +150,7 @@
+                     end
+                     if not nextQuest then
+                         for i = 4, #row do
+-                            if ANx.QuestGivers[row[i]] and can(row[i]) then
++                            if ANx.HasQuestGiver(row[i]) and can(row[i]) then
+                                 nextQuest = row[i] break
+                             end
+                         end
+@@ -426,7 +434,7 @@
+ -- Public entry: click handler
+ -- ---------------------------------------------------------------------
+ function ANx.SetQuestWaypoint(questId, questTitle)
+-    if not (ANx.QuestGivers and questId) then return false end
++    if not (ANx.QuestGiversPacked and questId) then return false end
+     local title = QuestName(questId, questTitle)
+ 
+     local target, status, hops, blocker = ANx.ResolveActionableQuest(questId)
+@@ -460,8 +468,8 @@
+             title, targetName,
+             hops > 1 and string.format(" |cff888888(%d quests in the chain before it unlocks)|r", hops) or ""))
+         -- level requirement note for the actionable quest (first packed field)
+-        local preStr = ANx.QuestPre and ANx.QuestPre[target]
+-        local minLvl = preStr and tonumber(preStr:match("^(%d+)"))
++        local preAt = PreRowStart(target)
++        local minLvl = preAt and tonumber(strmatch(ANx.QuestPreBlob, "^%d+", preAt))
+         if minLvl and minLvl > 0 and UnitLevel and UnitLevel("player") < minLvl then
+             ANx.Print("|cffff8040Note:|r \"" .. targetName .. "\" requires level " .. minLvl .. ".")
+         end
+--- a/UI.lua
++++ b/UI.lua
+@@ -2719,7 +2719,7 @@
+         local left = st.total - st.attuned
+         if st.total > 0 and (left > 0 or ANx.ShowAttunedItems()) then
+             shown = shown + 1
+-            local hasArrow = ANx.QuestGivers and ANx.QuestGivers[q.id] ~= nil
++            local hasArrow = ANx.HasQuestGiver(q.id)
+             local lock = ANx.GetQuestLockInfo and ANx.GetQuestLockInfo(q.id)
+             local prefix, hint = "", "click: waypoint arrow + rewards"
+             if lock == "locked" then
+@@ -3389,7 +3389,7 @@
+         elseif s.srcType == ANx.SRC.QUEST and s.objId then
+             -- quests: click the row to drop a waypoint arrow to the quest giver
+             -- (or to the next quest in the chain if this one isn't available yet).
+-            local hasArrow = ANx.QuestGivers and ANx.QuestGivers[s.objId] ~= nil
++            local hasArrow = ANx.HasQuestGiver(s.objId)
+             local lock = ANx.GetQuestLockInfo and ANx.GetQuestLockInfo(s.objId)
+             local prefix, hint = "", "click: waypoint arrow to the quest giver"
+             if lock == "locked" then
+--- a/Data_QuestItemStarts.lua
++++ b/Data_QuestItemStarts.lua
+@@ -147,12 +147,16 @@
+ [24442]={4742,561,187,"Kvaldir Reaver (drops the quest starter)"},
+ [24914]={4812,696,677,"The Lich King (drops the quest starter)"},
+ }
++-- Questie givers (QuestGiversPacked) win; only quests it has no giver for go
++-- into the small ANx.QuestGiversExtra overlay that ANx.QuestGiver /
++-- ANx.HasQuestGiver (Core.lua) consult after the packed index misses.
++local extra = {}
+ for qid, e in pairs(ANx.QuestItemStarts) do
+-    if not ANx.QuestGivers[qid] then
+-        -- QuestGivers values are packed "zone:x10:y10:name" strings now
+-        ANx.QuestGivers[qid] = e[1] .. ":" .. e[2] .. ":" .. e[3] .. ":" .. e[4]
++    if not ANx.PackedFind(ANx.QuestGiversPacked, qid, 5) then
++        extra[qid] = e[1] .. ":" .. e[2] .. ":" .. e[3] .. ":" .. e[4]
+     end
+ end
++ANx.QuestGiversExtra = extra
+ ANx.QuestItemStarts = nil   -- merge-only temporary; let the GC take the table
+ ANx.QuestItemStartNames = {
+ [2]="Sharptalon's Claw",

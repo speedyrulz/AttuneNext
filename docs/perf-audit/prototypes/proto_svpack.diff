@@ -1,0 +1,356 @@
+--- a/Engine.lua
++++ b/Engine.lua
+@@ -13,6 +13,9 @@
+ local instDiffCache = {}   -- ["map:diff"]    -> { itemIds }
+ local instResolved  = {}   -- [instTableRef]  -> { {label, diff, items}, ... }
+ local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, world, vendor, vendorByName }
++local zonePacked    = {}   -- [zoneId]        -> one packed string per zone (saved form; decoded
++                           --                    into zoneCache on first access, see ZoneData)
++local instPacked    = {}   -- ["map:diff"]    -> packed id string (saved form of instDiffCache)
+ local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
+ local srcCacheN     = 0    -- entries in srcCache
+ local srcCacheRows  = 0    -- source records held across all cached entries
+@@ -83,6 +86,7 @@
+     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
+         {}, {}, {}, {}, {}, {}, {}
+     srcCacheN, srcCacheRows = 0, 0
++    zonePacked, instPacked = {}, {}
+     limitedItemsSet = nil
+     eventItemsCache = {}
+     remainingCache = nil
+@@ -141,43 +145,192 @@
+ -- sessions stay accurate. Invalidated when the server loot-DB version
+ -- or the addon version changes, or via the Refresh button.
+ -- ---------------------------------------------------------------------
+-local function SetToArray(set)
+-    local a = {}
+-    for id in pairs(set) do
+-        if type(id) == "number" then a[#a + 1] = id end
++-- Format 2 (packed). Blizzard serializes AttuneNextDB at logout with one
++-- LINE per array element and one table constructor per list, and parses
++-- it all back at login. The structure used to be saved verbatim (one Lua
++-- table per id list, per quest and per vendor); it is now saved as
++-- strings: every id list is comma-joined and every zone is ONE string.
++-- The summary sets are decoded at import (every count needs them); zones
++-- and instance lists are decoded lazily, on first access, so a cached
++-- login decodes nothing it does not show.
++local SC_FMT = 2
++-- After the scan-end export the live zone tables are only a decoded copy
++-- of the packed strings; drop them and let ZoneData decode a zone again
++-- (well under a millisecond) when a screen asks for it.
++local RELEASE_ZONES_AT_SCAN_END = true
++local lastImport           -- { sc =, sums = }: the summary sets decoded from
++                           -- (or exported to) the current db.structCache. The
++                           -- validated import at data-ready re-reads the table
++                           -- the provisional import decoded at ADDON_LOADED;
++                           -- it reuses those sets instead of decoding twice.
++
++local function PackIds(arr)
++    return table.concat(arr, ",")
++end
++
++-- A long list compiles as a table constructor: the C lexer converts the
++-- numbers, ~40% faster than gmatch + tonumber. Short lists (a quest's
++-- items, a vendor's stock) are cheaper through gmatch than through a
++-- compile; a string loadstring rejects falls back to gmatch too.
++local function UnpackIds(s)
++    local a, n = {}, 0
++    if not s or s == "" then return a end
++    if #s > 256 then
++        local f = loadstring("return {" .. s .. "}")
++        if f then return f() end
++    end
++    for id in s:gmatch("%d+") do
++        n = n + 1
++        a[n] = tonumber(id)
+     end
+     return a
+ end
+ 
+-local function ArrayToSet(a)
+-    local s = {}
+-    for _, id in ipairs(a) do s[id] = true end
++local function PackSet(set)
++    local a, n = {}, 0
++    for id in pairs(set) do
++        if type(id) == "number" then
++            n = n + 1
++            a[n] = id
++        end
++    end
++    return table.concat(a, ",")
++end
++
++local function UnpackSet(s)
++    local set = {}
++    local a = UnpackIds(s)
++    for i = 1, #a do set[a[i]] = true end
++    return set
++end
++
++-- quest / vendor names are fields of a tab-separated record, one per line
++local function CleanName(s)
++    s = s or ""
++    if s:find("[\t\n]") then s = s:gsub("[\t\n]", " ") end
+     return s
+ end
+ 
+-function Engine.ExportCache()
+-    if not (ANx.db and ANx.LootDbLoaded()) then return end
++-- One zone -> one string: three id lines (quest, world, vendor), then one
++-- "q<TAB>questId<TAB>name<TAB>ids" line per questList entry (in list
++-- order, so the name sort survives) and one "v<TAB>npcId<TAB>name<TAB>ids"
++-- line per vendor. Every line is newline-terminated.
++local function PackZone(zc)
++    local out = { PackIds(zc.quest), PackIds(zc.world), PackIds(zc.vendor) }
++    local n = 3
++    for _, q in ipairs(zc.questList) do
++        n = n + 1
++        out[n] = "q\t" .. (q.id or "") .. "\t" .. CleanName(q.name) .. "\t" .. PackIds(q.items)
++    end
++    local vids = zc.vendorIdByName or {}
++    for name, list in pairs(zc.vendorByName) do
++        n = n + 1
++        out[n] = "v\t" .. (vids[name] or "") .. "\t" .. CleanName(name) .. "\t" .. PackIds(list)
++    end
++    return table.concat(out, "\n") .. "\n"
++end
++
++local function UnpackZone(s)
++    local zc = {
++        quest = {}, questList = {}, world = {}, vendor = {},
++        vendorByName = {}, vendorIdByName = {},
++    }
++    local i, nq = 0, 0
++    for line in s:gmatch("([^\n]*)\n") do
++        i = i + 1
++        if i == 1 then
++            zc.quest = UnpackIds(line)
++        elseif i == 2 then
++            zc.world = UnpackIds(line)
++        elseif i == 3 then
++            zc.vendor = UnpackIds(line)
++        else
++            local kind, id, name, ids = line:match("^(%a)\t(%-?%d*)\t([^\t]*)\t(.*)$")
++            if kind == "q" then
++                nq = nq + 1
++                zc.questList[nq] = { id = tonumber(id), name = name, items = UnpackIds(ids) }
++            elseif kind == "v" then
++                zc.vendorByName[name] = UnpackIds(ids)
++                if id ~= "" then zc.vendorIdByName[name] = tonumber(id) end
++            end
++        end
++    end
++    return zc
++end
++
++-- Builds the packed structure and installs it as ANx.db.structCache.
++-- `yield` (Engine.YieldNow from the scan-end job, nil at PLAYER_LOGOUT)
++-- spreads the string work over pump frames: packing is proportional to
++-- the zone data and takes well over a frame for a large structure.
++local function Export(yield, releaseLive)
++    -- pack only what has no packed copy yet: a zone / instance list never
++    -- changes once built, so a string it was decoded from is still exact.
++    -- (zone ids are snapshotted: a screen may add zones between yields)
++    local ids, n = {}, 0
++    for zid in pairs(zoneCache) do
++        n = n + 1
++        ids[n] = zid
++    end
++    for i = 1, n do
++        local zid = ids[i]
++        local zc = zoneCache[zid]
++        if zc and not zonePacked[zid] then
++            zonePacked[zid] = PackZone(zc)
++            if yield then yield() end
++        end
++    end
++    for key, items in pairs(instDiffCache) do
++        if not instPacked[key] then instPacked[key] = PackIds(items) end
++    end
++    if yield then yield() end
++    local function PS(set)
++        local s = PackSet(set)
++        if yield then yield() end
++        return s
++    end
+     local sums = {}
+     for exp, sum in pairs(summaryCache) do
+         if sum.ready then
+             local dl, rl = {}, {}
+-            for label, set in pairs(sum.Dl or {}) do dl[label] = SetToArray(set) end
+-            for label, set in pairs(sum.Rl or {}) do rl[label] = SetToArray(set) end
++            for label, set in pairs(sum.Dl or {}) do dl[label] = PS(set) end
++            for label, set in pairs(sum.Rl or {}) do rl[label] = PS(set) end
+             sums[exp] = {
+-                D = SetToArray(sum.D), R = SetToArray(sum.R), Q = SetToArray(sum.Q),
+-                W = SetToArray(sum.W), V = SetToArray(sum.V), C = SetToArray(sum.C),
++                D = PS(sum.D), R = PS(sum.R), Q = PS(sum.Q),
++                W = PS(sum.W), V = PS(sum.V), C = PS(sum.C),
+                 Dl = dl, Rl = rl,
+             }
+         end
+     end
+     ANx.db.structCache = {
++        fmt = SC_FMT,
+         version = _G.ItemLocIsLoaded(),
+         rev = ANx.VERSION,
+-        inst = instDiffCache,
+-        zones = zoneCache,
++        inst = instPacked,
++        zones = zonePacked,
+         summaries = sums,
+         savedAt = date and date("%Y-%m-%d %H:%M") or "",
+     }
++    -- the live sets ARE what the new table encodes: a later validated
++    -- import of it (data re-pushed by the server) reuses them
++    lastImport = { sc = ANx.db.structCache, sums = summaryCache }
++    if releaseLive then
++        -- the scan needed the live zone tables only to build the summaries
++        zoneCache = {}
++    end
++end
++
++-- Synchronous export (PLAYER_LOGOUT). Everything the scan-end job already
++-- packed is reused, so this is normally just the summary strings.
++function Engine.ExportCache()
++    if not (ANx.db and ANx.LootDbLoaded()) then return end
++    Export(nil, false)
++end
++
++-- Scan end, as a pump job: pack the zones the scan just built one per
++-- step, then the instance lists and summary sets, then install.
++local function ExportJob()
++    if not (ANx.db and ANx.LootDbLoaded()) then return end
++    Export(Engine.YieldNow, RELEASE_ZONES_AT_SCAN_END)
+ end
+ 
+ -- Returns true if a valid cache was restored. `provisional` restores the
+@@ -186,34 +339,42 @@
+ function Engine.ImportCache(provisional)
+     local sc = ANx.db and ANx.db.structCache
+     if not sc then return false end
+-    if sc.rev ~= ANx.VERSION then
++    if sc.rev ~= ANx.VERSION or sc.fmt ~= SC_FMT then
+         ANx.db.structCache = nil
++        lastImport = nil
+         return false
+     end
+     if not provisional and (not ANx.LootDbLoaded() or sc.version ~= _G.ItemLocIsLoaded()) then
+         ANx.db.structCache = nil
++        lastImport = nil
+         return false
+     end
+-    instDiffCache = sc.inst or {}
+-    zoneCache = sc.zones or {}
+-    summaryCache = {}
+-    for exp, sum in pairs(sc.summaries or {}) do
+-        local dl, rl = {}, {}
+-        for label, arr in pairs(sum.Dl or {}) do dl[label] = ArrayToSet(arr) end
+-        for label, arr in pairs(sum.Rl or {}) do rl[label] = ArrayToSet(arr) end
+-        summaryCache[exp] = {
+-            D = ArrayToSet(sum.D or {}), R = ArrayToSet(sum.R or {}), Q = ArrayToSet(sum.Q or {}),
+-            W = ArrayToSet(sum.W or {}), V = ArrayToSet(sum.V or {}), C = ArrayToSet(sum.C or {}),
+-            Dl = dl, Rl = rl,
+-            ready = true,
+-        }
++    -- zones and instance lists stay packed until something asks for them
++    instDiffCache, instPacked = {}, sc.inst or {}
++    zoneCache, zonePacked = {}, sc.zones or {}
++    sc.inst, sc.zones = instPacked, zonePacked
++    if lastImport and lastImport.sc == sc then
++        summaryCache = lastImport.sums
++    else
++        summaryCache = {}
++        for exp, sum in pairs(sc.summaries or {}) do
++            local dl, rl = {}, {}
++            for label, s in pairs(sum.Dl or {}) do dl[label] = UnpackSet(s) end
++            for label, s in pairs(sum.Rl or {}) do rl[label] = UnpackSet(s) end
++            summaryCache[exp] = {
++                D = UnpackSet(sum.D), R = UnpackSet(sum.R), Q = UnpackSet(sum.Q),
++                W = UnpackSet(sum.W), V = UnpackSet(sum.V), C = UnpackSet(sum.C),
++                Dl = dl, Rl = rl,
++                ready = true,
++            }
++        end
++        lastImport = { sc = sc, sums = summaryCache }
+     end
+     if not provisional then
+-        -- the arrays now live on as summaryCache sets; keeping the source
+-        -- arrays in the db too held the same ~20k+ ids twice all session.
+-        -- ExportCache rebuilds them from the live sets at scan-end and at
+-        -- PLAYER_LOGOUT, so nothing is lost. (The provisional import keeps
+-        -- them: the validated import at data-ready re-reads this table.)
++        -- the strings now live on as summaryCache sets; ExportCache rebuilds
++        -- them from the live sets at scan-end and at PLAYER_LOGOUT, so
++        -- nothing is lost. (The provisional import keeps them: the validated
++        -- import at data-ready re-reads this table.)
+         sc.summaries = nil
+     end
+     return true
+@@ -222,6 +383,7 @@
+ -- Full manual rescan (Refresh button / "/an reset")
+ function Engine.ForceRescan()
+     if ANx.db then ANx.db.structCache = nil end
++    lastImport = nil
+     if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
+     if ANx.InvalidateClassLockCache then ANx.InvalidateClassLockCache() end
+     if ANx.InvalidateAccessoryCache then ANx.InvalidateAccessoryCache() end
+@@ -293,7 +455,7 @@
+             -- was a serious source of GC hitches and SavedVariables bloat
+             if cacheDirty then
+                 cacheDirty = false
+-                pcall(Engine.ExportCache)
++                Engine.Enqueue(ExportJob, nil, "export")
+             end
+             -- FIRST: walk every item once in the background to fill the
+             -- per-item filter caches (faction/bind tooltip scans, sources,
+@@ -561,7 +723,12 @@
+     local key = map .. ":" .. diff
+     local c = instDiffCache[key]
+     if not c then
+-        c = ANx.ItemsInZone(ANx.BuildMapZoneId(map, diff))
++        local packed = instPacked[key]
++        if packed then
++            c = UnpackIds(packed)
++        else
++            c = ANx.ItemsInZone(ANx.BuildMapZoneId(map, diff))
++        end
+         instDiffCache[key] = c
+     end
+     return c
+@@ -786,8 +953,15 @@
+ -- Builds and caches the classification for one zone. Safe to call from a
+ -- coroutine (yields periodically) or synchronously.
+ function Engine.ZoneData(zoneEntry, inCoroutine)
+-    local zc = zoneCache[zoneEntry.zone]
++    local zid = zoneEntry.zone
++    local zc = zoneCache[zid]
+     if zc then return zc end
++    local packed = zonePacked[zid]
++    if packed then
++        zc = UnpackZone(packed)
++        zoneCache[zid] = zc
++        return zc
++    end
+ 
+     local universe = ANx.ItemsInZone(zoneEntry.zone)
+     zc = {
+@@ -864,7 +1038,8 @@
+ end
+ 
+ function Engine.ZoneReady(zoneEntry)
+-    return zoneCache[zoneEntry.zone] ~= nil
++    local zid = zoneEntry.zone
++    return zoneCache[zid] ~= nil or zonePacked[zid] ~= nil
+ end
+ 
+ function Engine.ZonesFor(exp, includeCities, citiesOnlyMode)
+@@ -1610,6 +1785,7 @@
+         clearChance = count(clearChanceCache),
+         stats = count(statsCache),
+         zones = count(zoneCache),
++        zonesPacked = count(zonePacked),
+         jobs = #Engine.scanJobs,
+         warm = cachesWarm,
+     }

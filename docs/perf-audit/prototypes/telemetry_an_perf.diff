@@ -1,0 +1,424 @@
+--- a/Core.lua
++++ b/Core.lua
+@@ -257,6 +257,25 @@
+ -- ---------------------------------------------------------------------
+ local timerFrame = CreateFrame("Frame")
+ local timers = {}
++-- /an perf telemetry: plain integer counters on paths that already run.
++-- Core owns the table (it loads first); Engine.lua adds its own fields and
++-- Engine.PerfStats() merges everything for the printer. Nothing here is
++-- more than an increment or a debugprofilestop() read per event.
++local perf = {
++    gsCalls = 0, gsEmpty = 0, gsRows = 0, gsMaxRows = 0, gsMaxItem = 0,   -- ANx.GetSources
++    cacheReq = 0,                                            -- RequestItemCache (SetHyperlink queries)
++    tipBind = 0, tipClass = 0, tipFac = 0, tipEmpty = 0,     -- tooltip scrapes per scraper, empty = item not cached
++    afterN = 0, afterMs = 0, afterMaxMs = 0, afterMaxName = "-",
++    statusExportMs = 0, statusExportN = 0,
++    readyAt = 0, readyN = 0,                                 -- GetTime() of the last data-ready
++}
++ANx.Perf = perf
++local function PerfClock()
++    if debugprofilestop then return debugprofilestop() end
++    return GetTime() * 1000
++end
++ANx.PerfClock = PerfClock
++
+ timerFrame:SetScript("OnUpdate", function(self, elapsed)
+     local now = GetTime()
+     local i = 1
+@@ -264,7 +283,15 @@
+         local t = timers[i]
+         if now >= t.at then
+             table.remove(timers, i)
++            local t0 = PerfClock()
+             local ok, err = pcall(t.func)
++            local ms = PerfClock() - t0
++            perf.afterN = perf.afterN + 1
++            perf.afterMs = perf.afterMs + ms
++            if ms > perf.afterMaxMs then
++                perf.afterMaxMs = ms
++                perf.afterMaxName = t.name or "anon"
++            end
+             if not ok then ANx.ReportError("timer error: " .. tostring(err)) end
+         else
+             i = i + 1
+@@ -273,8 +300,10 @@
+     if #timers == 0 then self:Hide() end   -- OnUpdate only fires while shown
+ end)
+ 
+-function ANx.After(delay, func)
+-    table.insert(timers, { at = GetTime() + delay, func = func })
++-- `name` is optional: /an perf reports the slowest deferred callback by it
++-- (the 3.3.5 client has no debug.getinfo to name a function after the fact)
++function ANx.After(delay, func, name)
++    table.insert(timers, { at = GetTime() + delay, func = func, name = name })
+     timerFrame:Show()
+ end
+ 
+@@ -538,6 +567,7 @@
+ function ANx.RequestItemCache(itemId)
+     if cacheRequested[itemId] then return end
+     cacheRequested[itemId] = true
++    perf.cacheReq = perf.cacheReq + 1
+     if not cacheTip then
+         cacheTip = CreateFrame("GameTooltip", "AttuneNextCacheTip", nil, "GameTooltipTemplate")
+         cacheTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+@@ -612,6 +642,7 @@
+     if not (ANx.db and ANx.Engine and ANx.dataReady) then return end
+     local universe, ready = ANx.Engine.Universe()
+     if not ready or #universe == 0 then return end
++    local t0 = PerfClock()
+     local tags, can, acct, prog, forge = {}, {}, {}, {}, {}
+     for _, id in ipairs(universe) do
+         if ANx.IsAttunableAtAll(id) then tags[#tags + 1] = id end
+@@ -634,6 +665,8 @@
+         forge = table.concat(forge, ","),
+     }
+     scSets = nil
++    perf.statusExportMs = PerfClock() - t0
++    perf.statusExportN = perf.statusExportN + 1
+ end
+ 
+ -- Can the CURRENT CHARACTER attune this item (class/armor/level checks)?
+@@ -884,10 +917,12 @@
+         bindTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+     end
+     bindTip:ClearLines()
++    perf.tipBind = perf.tipBind + 1
+     local ok = pcall(bindTip.SetHyperlink, bindTip, "item:" .. itemId)
+     if not ok then return nil end
+     local n = bindTip:NumLines()
+     if not n or n == 0 then
++        perf.tipEmpty = perf.tipEmpty + 1
+         -- item not in the client cache yet; remember that so counts don't
+         -- rescan the tooltip every render (retried above once it caches)
+         ANx.FlagSet(itemId, ANx.F_BIND, 7, 1)
+@@ -1067,10 +1102,11 @@
+         bindTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+     end
+     bindTip:ClearLines()
++    perf.tipClass = perf.tipClass + 1
+     local ok = pcall(bindTip.SetHyperlink, bindTip, "item:" .. itemId)
+     if not ok then return nil end
+     local n = bindTip:NumLines()
+-    if not n or n == 0 then return nil end   -- not cached yet; retry later
++    if not n or n == 0 then perf.tipEmpty = perf.tipEmpty + 1 return nil end   -- not cached yet; retry later
+     if not classLockPattern then
+         -- the client's own (localized) "Classes: %s" format, as a pattern
+         local fmt = _G.ITEM_CLASSES_ALLOWED or "Classes: %s"
+@@ -1159,10 +1195,11 @@
+         factionTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+     end
+     factionTip:ClearLines()
++    perf.tipFac = perf.tipFac + 1
+     local ok = pcall(factionTip.SetHyperlink, factionTip, "item:" .. itemId)
+     if not ok then return nil end
+     local n = factionTip:NumLines()
+-    if not n or n == 0 then return nil end        -- not cached yet; retry later
++    if not n or n == 0 then perf.tipEmpty = perf.tipEmpty + 1 return nil end        -- not cached yet; retry later
+     local function clean(s)
+         if not s then return nil end
+         return (s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+@@ -1557,7 +1594,10 @@
+ function ANx.GetSources(itemId)
+     if not ANx.LootDbLoaded() then return {} end
+     local n = _G.ItemLocGetSourceCount(itemId)
+-    if not n or n == 0 then return {} end
++    perf.gsCalls = perf.gsCalls + 1
++    if not n or n == 0 then perf.gsEmpty = perf.gsEmpty + 1 return {} end
++    perf.gsRows = perf.gsRows + n
++    if n > perf.gsMaxRows then perf.gsMaxRows = n; perf.gsMaxItem = itemId end
+     local out = {}
+     for i = 1, n do
+         local srcType, objType, objId, chance, perMille, objName, zoneName, spawned = _G.ItemLocGetSourceAt(itemId, i)
+@@ -1622,7 +1662,7 @@
+         ANx.Toast("AttuneNext data has been refreshed.")
+         return
+     end
+-    ANx.After(1, WatchRefreshDone)
++    ANx.After(1, WatchRefreshDone, "WatchRefreshDone")
+ end
+ 
+ -- Global function invoked by the Synastria client when server data is fully loaded.
+@@ -1635,6 +1675,8 @@
+     lastDataReadyAt = now
+     TryInit()
+     ANx.dataReady = true
++    perf.readyAt = GetTime()
++    perf.readyN = perf.readyN + 1
+     ANx.InvalidateStatusCacheSets()
+     refreshToasted = false   -- each data arrival announces one refresh
+     if ANx.Engine then
+@@ -1646,15 +1688,15 @@
+         -- refresh in the background; toast when everything is live
+         for exp = 1, 3 do ANx.Engine.GetSummary(exp) end
+         if ANx.Plates and ANx.Plates.OnDataReady then ANx.Plates.OnDataReady() end
+-        ANx.After(2, WatchRefreshDone)
++        ANx.After(2, WatchRefreshDone, "WatchRefreshDone")
+     end
+     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+     -- alt awareness: snapshot what this character can attune (background)
+-    if ANx.SnapshotAltCan then ANx.After(8, ANx.SnapshotAltCan) end
++    if ANx.SnapshotAltCan then ANx.After(8, ANx.SnapshotAltCan, "SnapshotAltCan") end
+     -- one-time SavedVariables trim (needs live attunable data)
+-    if ANx.TrimMerchantDb then ANx.After(15, ANx.TrimMerchantDb) end
++    if ANx.TrimMerchantDb then ANx.After(15, ANx.TrimMerchantDb, "TrimMerchantDb") end
+     -- on-screen goal window
+-    if ANx.GoalHudUpdate then ANx.After(6, ANx.GoalHudUpdate) end
++    if ANx.GoalHudUpdate then ANx.After(6, ANx.GoalHudUpdate, "GoalHudUpdate") end
+ end
+ 
+ eventFrame:SetScript("OnEvent", function(self, event, arg1)
+@@ -1717,17 +1759,17 @@
+                 if _G.GetCustomGameData(41, 0) ~= 0 then
+                     AttuneNext_OnDataReady()
+                 elseif tries <= 600 then
+-                    ANx.After(1, poll)
++                    ANx.After(1, poll, "login-poll")
+                 end
+             elseif tries > 20 then
+                 AttuneNext_OnDataReady()   -- non-Synastria client: init anyway
+             else
+-                ANx.After(1, poll)
++                ANx.After(1, poll, "login-poll")
+             end
+         end
+         poll()
+     elseif event == "MERCHANT_SHOW" then
+-        if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant) end
++        if ANx.ScanMerchant then ANx.After(0.2, ANx.ScanMerchant, "ScanMerchant") end
+     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
+         if ANx.QueueTradeSkillScan then ANx.QueueTradeSkillScan() end
+     elseif event == "BAG_UPDATE" or event == "PLAYERBANKSLOTS_CHANGED"
+@@ -1747,7 +1789,7 @@
+                     ANx.Engine.InvalidateOwned()
+                     ANx.Engine.InvalidateStats()
+                     if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+-                end)
++                end, "bags-refresh")
+             end
+         end
+     elseif event == "LOOT_OPENED" then
+@@ -1758,7 +1800,7 @@
+         if ANx.InvalidatePlayerLoc then ANx.InvalidatePlayerLoc() end
+         if ANx.UpdateCurrentInstance then ANx.UpdateCurrentInstance() end
+         if ANx.ZoneWatchUpdate then ANx.ZoneWatchUpdate(true) end
+-        if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras) end
++        if ANx.ScanSpeedAuras then ANx.After(2, ANx.ScanSpeedAuras, "ScanSpeedAuras") end
+         if ANx.Plates then ANx.Plates.OnZone() end
+     elseif event == "UNIT_AURA" then
+         -- debounced: in instanced combat this fires several times per second,
+@@ -1997,9 +2039,25 @@
+                 st.lua_kb, st.jobs, st.warm and "|cff00ff00warm|r" or "|cffffd100warming|r"))
+             ANx.Print(string.format("caches: sources=%d  stats=%d  zones=%d  runs=%d  picks=%d  odds=%d",
+                 st.srcCache, st.stats, st.zones, st.runsKeys, st.pickKeys, st.clearChance))
++            ANx.Print(string.format("fps %.0f  universe %d  flags %d  data-ready x%d; scan: summaries %.1fs, idle %.1fs after data-ready",
++                (GetFramerate and GetFramerate()) or 0, st.universe, st.flags, st.readyN, st.summariesS, st.idleS))
++            ANx.Print(string.format("pump: %d frames, %.0fms (max %.1fms in %s, %d over %dms); resume max %.1fms in %s; gc step %.0fms (max %.1fms)",
++                st.pumpFrames, st.pumpMs, st.pumpMaxMs, st.pumpMaxTag, st.pumpOver, st.budget * 2,
++                st.resumeMaxMs, st.resumeMaxTag, st.gcMs, st.gcMaxMs))
++            ANx.Print(string.format("sources: GetSources %d calls (%d empty) / %d rows, biggest %d rows (item %d); srcCache %d items / %d rows, %d flushes, %d too big",
++                st.gsCalls, st.gsEmpty, st.gsRows, st.gsMaxRows, st.gsMaxItem, st.srcCache, st.srcRows, st.srcFlush, st.srcTooBig))
++            ANx.Print(string.format("zones: %d items classified, %d by fallback, %d recognised-unmatched; unknown names: %s; zones with no match: %s",
++                st.zoneItems, st.zoneFallback, st.zoneUnmatched, st.unknownZones, st.unmatchedZones))
++            ANx.Print(string.format("client: tooltip scans bind %d / class %d / faction %d (empty %d), cache requests %d, GetItemCount %d",
++                st.tipBind, st.tipClass, st.tipFac, st.tipEmpty, st.cacheReq, st.ownedCalls))
++            ANx.Print(string.format("timers: %d callbacks, %.0fms, slowest %.1fms (%s); exports: struct %.0fms, status %.0fms x%d",
++                st.afterN, st.afterMs, st.afterMaxMs, st.afterMaxName, st.exportMs, st.statusExportMs, st.statusExportN))
+             collectgarbage("collect")
+             ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
+         end
++    elseif msg == "perf reset" then
++        if ANx.Engine and ANx.Engine.PerfReset then ANx.Engine.PerfReset() end
++        ANx.Print("perf counters reset")
+     elseif msg == "flush" then
+         local before = math.floor(collectgarbage("count"))
+         if ANx.Engine and ANx.Engine.FlushSources then ANx.Engine.FlushSources() end
+@@ -2024,7 +2082,7 @@
+         if ANx.UpdateMinimapButton then ANx.UpdateMinimapButton() end
+         ANx.Print("minimap button " .. (ANx.db.minimapShow and "shown" or "hidden"))
+     elseif msg == "help" then
+-        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an perf, /an flush, /an src <itemId>, /an scale <n>, /an reset, /an debug")
++        ANx.Print("commands: /an (open), /an browse (simple window), /an settings, /an minimap, /an hud, /an unskinned, /an times [reset], /an timemode <mode>, /an plates, /an perf [reset], /an flush, /an src <itemId>, /an scale <n>, /an reset, /an debug")
+     else
+         if ANx.UI then ANx.UI.Toggle() end
+     end
+--- a/Engine.lua
++++ b/Engine.lua
+@@ -57,6 +57,20 @@
+                            -- and not a stray global - see minLvlCache history)
+ local cacheDirty = false   -- structural data changed since the last export
+ 
++-- /an perf telemetry: Engine's share of the counter table Core.lua owns
++-- (created here too so a Core without it - AttuneNext-Simple's - still loads)
++ANx.Perf = ANx.Perf or { readyAt = 0 }
++local perf = ANx.Perf
++perf.srcFlush, perf.srcTooBig = 0, 0                 -- Sources(): wholesale flushes, items never cached
++perf.zoneItems, perf.zoneFallback, perf.zoneUnmatched = 0, 0, 0
++perf.unk, perf.unkN = {}, 0                          -- bounded sample of zone names we do not know
++perf.unmatched, perf.unmatchedN = {}, 0              -- bounded sample of OUR zones no row ever named
++perf.ownedCalls = 0                                  -- GetItemCount from IsOwned
++perf.pumpFrames, perf.pumpOver, perf.pumpMs, perf.pumpMaxMs, perf.pumpMaxTag = 0, 0, 0, 0, "-"
++perf.resumeMaxMs, perf.resumeMaxTag = 0, "-"
++perf.gcMs, perf.gcMaxMs = 0, 0
++perf.exportMs, perf.summariesS, perf.idleS = 0, 0, 0
++
+ -- Bumped whenever anything that affects counts changes (filters, attunes,
+ -- scans). Caches key off it instead of being cleared everywhere by hand.
+ Engine.rev = 0
+@@ -271,9 +285,13 @@
+     end
+     Engine.scanning = true
+     local start = Clock()
+-    while Clock() - start < BUDGET_MS do
++    local now = start
++    while now - start < BUDGET_MS do
+         if coroutine.status(job.co) == "dead" then break end
+         local ok, err = coroutine.resume(job.co)
++        local t = Clock()   -- (the loop condition read the clock here anyway)
++        if t - now > perf.resumeMaxMs then perf.resumeMaxMs = t - now; perf.resumeMaxTag = tostring(job.tag) end
++        now = t
+         if not ok then
+             ANx.Print("|cffff4040scan error:|r " .. tostring(err))
+             break
+@@ -284,16 +302,28 @@
+     -- times the live data during login; a small step per scan frame keeps it
+     -- bounded (cheap: only runs while a background job is active).
+     collectgarbage("step", GC_STEP_KB)
++    local gcEnd = Clock()
++    local gcMs, frameMs = gcEnd - now, gcEnd - start
++    perf.pumpFrames = perf.pumpFrames + 1
++    perf.pumpMs = perf.pumpMs + frameMs
++    perf.gcMs = perf.gcMs + gcMs
++    if gcMs > perf.gcMaxMs then perf.gcMaxMs = gcMs end
++    if frameMs > perf.pumpMaxMs then perf.pumpMaxMs = frameMs; perf.pumpMaxTag = tostring(job.tag) end
++    if frameMs > BUDGET_MS * 2 then perf.pumpOver = perf.pumpOver + 1 end
+     if coroutine.status(job.co) == "dead" then
+         table.remove(Engine.scanJobs, 1)
+         if #Engine.scanJobs == 0 then
+             Engine.scanning = false
++            if perf.readyAt > 0 then perf.idleS = GetTime() - perf.readyAt end
+             -- persist the structural cache ONLY when a scan actually changed
+             -- it - re-serializing thousands of ids after every filter click
+             -- was a serious source of GC hitches and SavedVariables bloat
+             if cacheDirty then
+                 cacheDirty = false
++                if perf.readyAt > 0 then perf.summariesS = GetTime() - perf.readyAt end
++                local t0 = Clock()
+                 pcall(Engine.ExportCache)
++                perf.exportMs = Clock() - t0
+             end
+             -- FIRST: walk every item once in the background to fill the
+             -- per-item filter caches (faction/bind tooltip scans, sources,
+@@ -452,10 +482,13 @@
+             if srcCacheN >= srcCacheCap or srcCacheRows + rows > SRC_ROW_BUDGET then
+                 srcCache = {}
+                 srcCacheN, srcCacheRows = 0, 0
++                perf.srcFlush = perf.srcFlush + 1
+             end
+             srcCache[itemId] = s
+             srcCacheN = srcCacheN + 1
+             srcCacheRows = srcCacheRows + rows
++        else
++            perf.srcTooBig = perf.srcTooBig + 1
+         end
+     end
+     return s
+@@ -746,6 +779,7 @@
+ function Engine.IsOwned(itemId)
+     if EquippedSet()[itemId] then return true end
+     if _G.GetItemCount then
++        perf.ownedCalls = perf.ownedCalls + 1
+         local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
+         if ok and type(c) == "number" and c > 0 then return true end
+     end
+@@ -804,6 +838,7 @@
+     local questsById = {}
+     local known = Engine.KnownZoneNameSet()
+     local zLower = (zoneEntry.name or ""):lower()
++    local zMatched = 0
+     for _, itemId in ipairs(universe) do
+         if inCoroutine then Engine.MaybeYield() end
+         local sources = Engine.Sources(itemId)
+@@ -818,10 +853,19 @@
+             local zl = s.zoneLower
+             if zl and zl ~= "" then
+                 if zl == zLower then matchedThisZone = true end
+-                if known[zl] then recognized = true end
++                if known[zl] then recognized = true
++                elseif perf.unkN < 8 and not perf.unk[zl] then
++                    -- a zone name the addon does not know (localized client,
++                    -- renamed or new content): keep the first eight for /an perf
++                    perf.unk[zl] = true; perf.unkN = perf.unkN + 1
++                end
+             end
+         end
+         local fallback = (not matchedThisZone) and (not recognized)
++        perf.zoneItems = perf.zoneItems + 1
++        if matchedThisZone then zMatched = zMatched + 1
++        elseif fallback then perf.zoneFallback = perf.zoneFallback + 1
++        else perf.zoneUnmatched = perf.zoneUnmatched + 1 end
+         local isQuest, isWorld, isVendor = false, false, false
+         for _, s in ipairs(sources) do
+             if fallback or s.zoneLower == zLower then
+@@ -859,6 +903,11 @@
+         if isVendor then zc.vendor[#zc.vendor + 1] = itemId end
+     end
+     table.sort(zc.questList, function(a, b) return (a.name or "") < (b.name or "") end)
++    if zMatched == 0 and #universe > 0 and perf.unmatchedN < 8 then
++        -- none of this zone's items named it: the server spells it differently
++        perf.unmatchedN = perf.unmatchedN + 1
++        perf.unmatched[perf.unmatchedN] = zoneEntry.name or tostring(zoneEntry.zone)
++    end
+     zoneCache[zoneEntry.zone] = zc
+     return zc
+ end
+@@ -1141,6 +1190,7 @@
+ function Engine.HaveCount(itemId)
+     local n = 0
+     if _G.GetItemCount then
++        perf.ownedCalls = perf.ownedCalls + 1
+         local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
+         if ok and type(c) == "number" then n = n + c end
+     end
+@@ -1601,9 +1651,10 @@
+         for _ in pairs(t or {}) do n = n + 1 end
+         return n
+     end
+-    return {
++    local st = {
+         lua_kb = math.floor(collectgarbage("count")),
+         srcCache = count(srcCache),
++        srcRows = srcCacheRows,
+         srcCap = srcCacheCap,
+         runsKeys = count(runsCache),
+         pickKeys = count(pickCache),
+@@ -1612,7 +1663,28 @@
+         zones = count(zoneCache),
+         jobs = #Engine.scanJobs,
+         warm = cachesWarm,
++        budget = BUDGET_MS,
++        universe = Engine.universeCache and #Engine.universeCache or 0,
++        flags = count(itemFlags),
+     }
++    for k, v in pairs(perf) do
++        if type(v) ~= "table" then st[k] = v end
++    end
++    local names = {}
++    for name in pairs(perf.unk) do names[#names + 1] = name end
++    table.sort(names)
++    st.unknownZones = (#names > 0) and table.concat(names, ", ") or "none"
++    st.unmatchedZones = (perf.unmatchedN > 0) and table.concat(perf.unmatched, ", ") or "none"
++    return st
++end
++
++-- /an perf reset: zero the counters (after a /an reset rescan, say)
++function Engine.PerfReset()
++    for k, v in pairs(perf) do
++        if type(v) == "number" then perf[k] = 0
++        elseif type(v) == "string" then perf[k] = "-"
++        elseif type(v) == "table" then perf[k] = {} end
++    end
+ end
+ 
+ function Engine.GetSummary(exp, onDone)

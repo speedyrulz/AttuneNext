@@ -1,0 +1,220 @@
+--- a/Core.lua
++++ b/Core.lua
+@@ -1353,6 +1353,8 @@
+ 
+ function ANx.InvalidateQuestDoable()
+     questDoable = {}
++    -- best-source answers rank quest rows by this predicate
++    if ANx.Engine and ANx.Engine.InvalidateBestSource then ANx.Engine.InvalidateBestSource() end
+ end
+ 
+ function ANx.CharCanDoQuest(questId)
+@@ -1553,6 +1555,7 @@
+     end
+     return l
+ end
++ANx.ZoneLower = ZoneLower   -- Engine.BestSource streams rows and lowers zone names itself
+ 
+ function ANx.GetSources(itemId)
+     if not ANx.LootDbLoaded() then return {} end
+--- a/Engine.lua
++++ b/Engine.lua
+@@ -41,6 +41,7 @@
+ -- through ANx.FlagGet cost two global lookups plus a call per read, and the
+ -- warmup performs one read (and one write) per item per predicate.
+ local itemFlags = ANx.ItemFlags
++local ZoneLower = ANx.ZoneLower   -- memoized lower-case zone names (Core.lua)
+ local band, lshift, rshift = bit.band, bit.lshift, bit.rshift
+ local F_QSIDE, F_QONLY, F_QCHAR = ANx.F_QSIDE, ANx.F_QONLY, ANx.F_QCHAR
+ local F_ZEX, F_MINLVL = ANx.F_ZEX, ANx.F_MINLVL
+@@ -72,6 +73,7 @@
+     clearChanceCache = {}
+     runsCache = {}
+     pickCache = {}
++    Engine.InvalidateBestSource()
+     BumpRev()
+     -- a filter may have just been switched on that needs a predicate the
+     -- warmup skipped; top it up in the background (tag-deduped, so the
+@@ -89,6 +91,7 @@
+     clearChanceCache = {}
+     runsCache = {}
+     pickCache = {}
++    Engine.InvalidateBestSource()
+     -- clear the Engine-owned fields of the consolidated flag cache (quest
+     -- side/only/char-blocked, zone-exclusive, min level). Core's bind/
+     -- faction/accessory fields survive a data refresh exactly as their old
+@@ -444,8 +447,9 @@
+     if not s then
+         -- keep only a working set: source records are named-key tables (~8
+         -- fields each), so caching every item in a big DB burned hundreds of
+-        -- MB. Filters/counts use the small derived caches, not this - only
+-        -- the items actually viewed/ranked need their raw sources.
++        -- MB. Filters/counts use the small derived caches, not this, and
++        -- BestSource streams rows off the API - only the detail / sources
++        -- screens and the predicate warm-up need the raw arrays.
+         s = ANx.GetSources(itemId)
+         local rows = #s
+         if rows <= SRC_ROW_BUDGET then
+@@ -514,43 +518,109 @@
+ end
+ 
+ -- Best source for an item, preferring sources in the given zone name + src filter.
+--- Returns chance, sourceName, srcType, restricted(bool), zoneName
+--- returns chance, sourceName, srcType, restricted, zoneName, sourceRecord
++-- Returns chance, sourceName, srcType, restricted(bool), zoneName, objId
++--   (restricted = true when the winner lies in the requested zone)
+ -- Quest sources this character can never take (the other faction's copy of
+ -- a dual-version quest) must not win "best source" while a usable source
+--- exists - a Horde player should be shown the Horde quest giver.
+-local function SourceUsable(s)
+-    if s.srcType ~= ANx.SRC.QUEST or not s.objId then return true end
+-    return ANx.CharCanDoQuest(s.objId)
++-- exists - a Horde player should be shown the Horde quest giver. Usable
++-- sources always outrank blocked ones; blocked are a last resort so
++-- account-scope displays still have something to show.
++--
++-- Streams the rows straight off the server API (or off the cached array
++-- when the item happens to be in the Sources working set) and keeps only the
++-- winning row's fields. This used to materialize the item's whole source
++-- array through Engine.Sources: the heaviest items (world drops with
++-- thousands of creature rows) are exactly the ones the bounded cache never
++-- keeps, so every card / list row / search hit rebuilt thousands of row
++-- tables for them on each render.
++--
++-- Answers are memoized per (srcFilter, zoneName, item) until the next
++-- Engine.rev bump (InvalidateStats) or data refresh: the list screens ask
++-- for the same items again on every repaint. Bounded; flushed wholesale.
++local bestMemo = {}     -- [srcFilter or false][zoneName or false][itemId] -> {chance, name, type, restricted, zone, objId} | false
++local bestMemoN = 0
++local BEST_MEMO_CAP = 4000
++
++function Engine.InvalidateBestSource()
++    bestMemo = {}
++    bestMemoN = 0
+ end
+ 
+ function Engine.BestSource(itemId, zoneName, srcFilter)
+-    local best, bestAny, bestBlocked, bestAnyBlocked
+-    -- lower the target once; records carry zoneLower (set in ANx.GetSources)
+-    local zTarget = zoneName and zoneName:lower()
+-    for _, s in ipairs(Engine.Sources(itemId)) do
+-        local typeOk = (not srcFilter) or srcFilter[s.srcType]
+-        if typeOk then
+-            local zoneHit = zTarget ~= nil and (s.zoneLower or "") == zTarget
+-            if SourceUsable(s) then
+-                if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
+-                if zoneHit then
+-                    if (not best) or s.chance > best.chance then best = s end
++    local byFilter = bestMemo[srcFilter or false]
++    local byZone = byFilter and byFilter[zoneName or false]
++    local hit = byZone and byZone[itemId]
++    if hit ~= nil then
++        if hit then return hit[1], hit[2], hit[3], hit[4], hit[5], hit[6] end
++        return nil
++    end
++    -- lower the target once; rows are compared through the memoized
++    -- ANx.ZoneLower (no per-row string churn)
++    local zTarget = zoneName and ZoneLower(zoneName)
++    local SRC_QUEST = ANx.SRC.QUEST
++    local CanDo = ANx.CharCanDoQuest
++    -- two running winners, "in the zone" (z*) and "anywhere" (a*): a usable
++    -- row replaces a blocked one outright, otherwise a strictly higher
++    -- chance wins (first row keeps ties, as before)
++    local zC, zU, zName, zType, zZone, zId
++    local aC, aU, aName, aType, aZone, aId
++    local loaded = true
++    local cached = srcCache[itemId]
++    if cached then
++        for i = 1, #cached do
++            local s = cached[i]
++            local st = s.srcType
++            if (not srcFilter) or srcFilter[st] then
++                local c, oid = s.chance, s.objId
++                local u = st ~= SRC_QUEST or not oid or CanDo(oid)
++                if aC == nil or (u and not aU) or (u == aU and c > aC) then
++                    aC, aU, aName, aType, aZone, aId = c, u, s.objName, st, s.zoneName, oid
+                 end
+-            else
+-                if (not bestAnyBlocked) or s.chance > bestAnyBlocked.chance then bestAnyBlocked = s end
+-                if zoneHit then
+-                    if (not bestBlocked) or s.chance > bestBlocked.chance then bestBlocked = s end
++                if zTarget ~= nil and s.zoneLower == zTarget then
++                    if zC == nil or (u and not zU) or (u == zU and c > zC) then
++                        zC, zU, zName, zType, zZone, zId = c, u, s.objName, st, s.zoneName, oid
++                    end
+                 end
+             end
+         end
++    else
++        local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
++        loaded = ANx.LootDbLoaded() and getCount and getAt
++        local n = loaded and getCount(itemId) or 0
++        for i = 1, n do
++            local st, _, oid, c, _, oname, zn = getAt(itemId, i)
++            if st ~= nil and ((not srcFilter) or srcFilter[st]) then
++                c = c or 0
++                local u = st ~= SRC_QUEST or not oid or CanDo(oid)
++                if aC == nil or (u and not aU) or (u == aU and c > aC) then
++                    aC, aU, aName, aType, aZone, aId = c, u, oname or "?", st, zn or "", oid
++                end
++                if zTarget ~= nil and ZoneLower(zn) == zTarget then
++                    if zC == nil or (u and not zU) or (u == zU and c > zC) then
++                        zC, zU, zName, zType, zZone, zId = c, u, oname or "?", st, zn or "", oid
++                    end
++                end
++            end
++        end
++    end
++    local r = false
++    if zC ~= nil then
++        r = { zC, zName, zType, true, zZone, zId }
++    elseif aC ~= nil then
++        r = { aC, aName, aType, false, aZone, aId }
++    end
++    if loaded then        -- never pin "no source" from before the loot DB was up
++        if bestMemoN >= BEST_MEMO_CAP then
++            bestMemo = {}
++            bestMemoN = 0
++            byFilter, byZone = nil, nil
++        end
++        if not byFilter then byFilter = {}; bestMemo[srcFilter or false] = byFilter end
++        if not byZone then byZone = {}; byFilter[zoneName or false] = byZone end
++        byZone[itemId] = r
++        bestMemoN = bestMemoN + 1
+     end
+-    -- usable sources always outrank blocked ones; blocked are a last resort
+-    -- so account-scope displays still have something to show
+-    best = best or bestBlocked
+-    bestAny = bestAny or bestAnyBlocked
+-    if best then return best.chance, best.objName, best.srcType, true, best.zoneName, best end
+-    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName, bestAny end
++    if r then return r[1], r[2], r[3], r[4], r[5], r[6] end
+     return nil
+ end
+ 
+@@ -1605,6 +1675,7 @@
+         lua_kb = math.floor(collectgarbage("count")),
+         srcCache = count(srcCache),
+         srcCap = srcCacheCap,
++        bestMemo = bestMemoN,
+         runsKeys = count(runsCache),
+         pickKeys = count(pickCache),
+         clearChance = count(clearChanceCache),
+@@ -1992,7 +2063,7 @@
+     local ck = itemId .. "|" .. (zoneName or "")
+     local hit = clearChanceCache[ck]
+     if hit then return hit[1], hit[2] end
+-    local chance, srcName, srcType, restricted, zname, src = Engine.BestSource(itemId, zoneName, srcFilter)
++    local chance, srcName, _, _, _, objId = Engine.BestSource(itemId, zoneName, srcFilter)
+     local out
+     if not chance or chance <= 0 then
+         out = 0
+@@ -2001,7 +2072,7 @@
+         if p >= 1 then
+             out = 1
+         else
+-            local n = Engine.SpawnCount(src and src.objId)
++            local n = Engine.SpawnCount(objId)
+             out = (n <= 1) and p or (1 - (1 - p) ^ n)
+         end
+     end
