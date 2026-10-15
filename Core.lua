@@ -270,6 +270,7 @@ local perf = {
     readyAt = 0, readyN = 0,                                 -- GetTime() of the last data-ready
     zfN = 0, zfMs = 0, zfMaxMs = 0, zfMaxZone = 0,           -- ItemLocGetAllItemsInZone calls
     rowReads = 0, memoItems = 0,                             -- streamed source rows read, scan memos built
+    idxItems = 0, idxFlush = 0, idxHits = 0,                 -- BestSource index: items indexed, wholesale flushes, served from index
 }
 ANx.Perf = perf
 local function PerfClock()
@@ -1464,6 +1465,8 @@ ANx.QuestRaceExtra = ANx.QuestRaceExtra or {}
 local questDoable = {}
 
 function ANx.InvalidateQuestDoable()
+    -- the source index keys quest rows on "can this character take it"
+    if ANx.Engine and ANx.Engine.InvalidateSourceIndex then ANx.Engine.InvalidateSourceIndex() end
     questDoable = {}
 end
 
@@ -1646,16 +1649,26 @@ function ANx.BuildMapZoneId(mapId, difficulty)
 end
 
 -- All attunable + obtainable itemIds for a zoneId (open world) or map zone id
+-- Session cache: ItemLocGetAllItemsInZone costs 60-140 ms per call on the
+-- live client (24 s of the Oct 15 login scan over 400 calls, and 7 s of a
+-- cached relog over 74), so each zone / instance difficulty is fetched once.
+-- Dropped on a data refresh (Engine.InvalidateAll).
+local zoneItemsCache = {}
+function ANx.InvalidateZoneItems()
+    zoneItemsCache = {}
+end
+
 function ANx.ItemsInZone(zoneId)
+    local c = zoneItemsCache[zoneId]
+    if c then return c end
     if not ANx.LootDbLoaded() then return {} end
-    -- timed: one server call per zone / instance difficulty, untimed until
-    -- v3.7.0 and a suspect for the multi-second scan resumes seen in game
     local t0 = PerfClock()
     local r = _G.ItemLocGetAllItemsInZone(zoneId, 0, 0, 1, 1) or {}
     local ms = PerfClock() - t0
     perf.zfN = perf.zfN + 1
     perf.zfMs = perf.zfMs + ms
     if ms > perf.zfMaxMs then perf.zfMaxMs = ms; perf.zfMaxZone = zoneId end
+    zoneItemsCache[zoneId] = r
     return r
 end
 
@@ -2149,8 +2162,8 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
                 st.afterN, st.afterMs, st.afterMaxMs, st.afterMaxName, st.exportMs, st.statusExportMs, st.statusExportN))
             ANx.Print(string.format("zone fetches: %d calls, %.0fms, max %.1fms (zone %s); longest resume ended at '%s', Lua %d KB -> %d KB; peak Lua %d KB during %s",
                 st.zfN, st.zfMs, st.zfMaxMs, tostring(st.zfMaxZone), st.resumeMaxSite, st.resumeMaxKbIn, st.resumeMaxKbOut, st.peakKb, st.peakTag))
-            ANx.Print(string.format("streaming: %d source rows read without tables, %d items memoized for the scan",
-                st.rowReads, st.memoItems))
+            ANx.Print(string.format("streaming: %d source rows read without tables, %d items memoized for the scan; source index: %d items, %d lookups served, %d flushes",
+                st.rowReads, st.memoItems, st.idxItems, st.idxHits, st.idxFlush))
             collectgarbage("collect")
             ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
         end

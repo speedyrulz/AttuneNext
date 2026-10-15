@@ -103,6 +103,8 @@ function Engine.InvalidateAll()
     instDiffCache, instResolved, zoneCache, srcCache, profCache, statsCache, summaryCache =
         {}, {}, {}, {}, {}, {}, {}
     srcCacheN, srcCacheRows = 0, 0
+    if ANx.InvalidateZoneItems then ANx.InvalidateZoneItems() end
+    if Engine.InvalidateSourceIndex then Engine.InvalidateSourceIndex() end
     limitedItemsSet = nil
     eventItemsCache = {}
     remainingCache = nil
@@ -641,39 +643,92 @@ local function SourceUsable(s)
     return ANx.CharCanDoQuest(s.objId)
 end
 
-function Engine.BestSource(itemId, zoneName, srcFilter)
-    -- Streams the rows (no tables): keeps the best row INDEX in each of four
-    -- classes, then re-reads the winner. Returns chance, objName, srcType,
-    -- inZone, zoneName, objId.
+-- ---- per-item source index ---------------------------------------------
+-- BestSource is asked once per (item, zone) by every zone list, ranking and
+-- HUD, and each call streamed the item's whole row list: a cached relog's
+-- run ranking read 4.3 million rows. The index holds, per item, the best
+-- row of each (zone, source type, usable) group as five flat slots:
+-- zoneLower, srcType, usable (1/0), chance, rowIndex. One walk per item;
+-- any (zone, filter) question is then answered from a few dozen slots and
+-- one re-read of the winning row. Bounded by total slots, flushed wholesale
+-- on overflow, on a data refresh, and when quest doability changes.
+local srcIndex, srcIndexSlots = {}, 0
+local SRC_INDEX_SLOT_CAP = 400000
+local idxKeys = {}   -- scratch: group key -> position of its 5 slots
+
+function Engine.InvalidateSourceIndex()
+    srcIndex, srcIndexSlots = {}, 0
+end
+
+local function SourceIndex(itemId)
+    local ix = srcIndex[itemId]
+    if ix then return ix end
     local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
     if not (getCount and getAt and ANx.LootDbLoaded()) then return nil end
     local ZoneLower = ANx.ZoneLower
-    local zTarget = zoneName and ZoneLower(zoneName)
     local SRC_QUEST = ANx.SRC.QUEST
     local CanDo = ANx.CharCanDoQuest
-    local bC, bI, aC, aI, bbC, bbI, abC, abI   -- zone/usable, any/usable, zone/blocked, any/blocked
     local n = getCount(itemId) or 0
     perf.rowReads = perf.rowReads + n
+    ix = {}
+    local m = 0
     for i = 1, n do
         local srcType, _, objId, chance, _, _, zn = getAt(itemId, i)
-        if srcType ~= nil and ((not srcFilter) or srcFilter[srcType]) then
+        if srcType ~= nil then
             chance = chance or 0
-            local zoneHit = zTarget ~= nil and ZoneLower(zn) == zTarget
-            if srcType ~= SRC_QUEST or not objId or CanDo(objId) then
-                if (not aI) or chance > aC then aC, aI = chance, i end
-                if zoneHit and ((not bI) or chance > bC) then bC, bI = chance, i end
-            else
-                if (not abI) or chance > abC then abC, abI = chance, i end
-                if zoneHit and ((not bbI) or chance > bbC) then bbC, bbI = chance, i end
+            local zl = ZoneLower(zn)
+            local usable = (srcType ~= SRC_QUEST or not objId or CanDo(objId)) and 1 or 0
+            local key = zl .. "|" .. srcType .. "|" .. usable
+            local p = idxKeys[key]
+            if not p then
+                p = m + 1
+                idxKeys[key] = p
+                ix[p], ix[p + 1], ix[p + 2], ix[p + 3], ix[p + 4] = zl, srcType, usable, chance, i
+                m = m + 5
+            elseif chance > ix[p + 3] then
+                ix[p + 3], ix[p + 4] = chance, i   -- strict: the FIRST row of a tie wins
             end
         end
     end
-    -- usable sources always outrank blocked ones; blocked are a last resort
-    -- so account-scope displays still have something to show
+    for k in pairs(idxKeys) do idxKeys[k] = nil end
+    if srcIndexSlots + m > SRC_INDEX_SLOT_CAP then
+        srcIndex, srcIndexSlots = {}, 0
+        perf.idxFlush = perf.idxFlush + 1
+    end
+    srcIndex[itemId] = ix
+    srcIndexSlots = srcIndexSlots + m
+    perf.idxItems = perf.idxItems + 1
+    return ix
+end
+
+function Engine.BestSource(itemId, zoneName, srcFilter)
+    -- Returns chance, objName, srcType, inZone, zoneName, objId.
+    -- Usable sources always outrank blocked ones (a blocked source is a
+    -- quest this character cannot take); zone matches outrank the rest; then
+    -- higher chance, then the earlier row.
+    local ix = SourceIndex(itemId)
+    if not ix then return nil end
+    local zTarget = zoneName and ANx.ZoneLower(zoneName)
+    local bC, bI, aC, aI, bbC, bbI, abC, abI   -- zone/usable, any/usable, zone/blocked, any/blocked
+    for p = 1, #ix, 5 do
+        local srcType = ix[p + 1]
+        if (not srcFilter) or srcFilter[srcType] then
+            local chance, row = ix[p + 3], ix[p + 4]
+            local zoneHit = zTarget ~= nil and ix[p] == zTarget
+            if ix[p + 2] == 1 then
+                if (not aI) or chance > aC or (chance == aC and row < aI) then aC, aI = chance, row end
+                if zoneHit and ((not bI) or chance > bC or (chance == bC and row < bI)) then bC, bI = chance, row end
+            else
+                if (not abI) or chance > abC or (chance == abC and row < abI) then abC, abI = chance, row end
+                if zoneHit and ((not bbI) or chance > bbC or (chance == bbC and row < bbI)) then bbC, bbI = chance, row end
+            end
+        end
+    end
     local idx, inZone = bI or bbI, true
     if not idx then idx, inZone = aI or abI, false end
     if not idx then return nil end
-    local srcType, _, objId, chance, _, objName, zn = getAt(itemId, idx)
+    perf.idxHits = perf.idxHits + 1
+    local srcType, _, objId, chance, _, objName, zn = _G.ItemLocGetSourceAt(itemId, idx)
     return chance or 0, objName or "?", srcType, inZone, zn or "", objId
 end
 
@@ -684,6 +739,9 @@ local function FetchInstDiff(map, diff)
     local key = map .. ":" .. diff
     local c = instDiffCache[key]
     if not c then
+        -- each uncached fetch is one 60-140 ms server call: give it its own
+        -- frame when running on the pump (three in a row made a 450 ms resume)
+        if coroutine.running() then Engine.YieldNow("inst-fetch") end
         c = ANx.ItemsInZone(ANx.BuildMapZoneId(map, diff))
         instDiffCache[key] = c
     end
