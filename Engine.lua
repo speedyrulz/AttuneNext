@@ -16,16 +16,16 @@ local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, w
 local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
 local srcCacheN     = 0    -- entries in srcCache
 local srcCacheRows  = 0    -- source records held across all cached entries
-local srcCacheCap   = 3000 -- flush past this: source arrays are heavy (~8 named
-                           -- fields per record) and only a handful of items are
-                           -- ever viewed at once. Big while the warmup sweeps;
-                           -- FlushSources lowers it once the derived predicate
-                           -- caches are filled (~1+ MB steady-state saved)
+local srcCacheCap   = 32   -- flush past this. Since v3.7.0 every scan, count
+                           -- and filter streams rows straight off the server
+                           -- API (EachSourceRow / BuildItemMemo); only the item
+                           -- detail page and the arrow router still want a
+                           -- row ARRAY, and they look at one item at a time.
 -- The item cap alone is not a memory bound: a world-drop item can list
--- thousands of creatures, so 3000 such items held millions of record tables
--- and pushed the 32-bit client past its 2 GB limit at login. Budget the
--- cache by RECORDS too; an item bigger than the whole budget is never cached.
-local SRC_ROW_BUDGET = 60000
+-- thousands of creatures, so a 3000-item cache once held millions of record
+-- tables and pushed the 32-bit client past its 2 GB limit at login. Budget
+-- the cache by RECORDS too; an item bigger than the whole budget is never cached.
+local SRC_ROW_BUDGET = 20000
 local limitedItemsSet      -- set of itemIds limited-stock at some vendor (lazy)
 local eventItemsCache = {} -- [eventName]     -> { itemIds }
 local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill, srcType} } }
@@ -56,6 +56,10 @@ local warmed = {}          -- [predicate] = true once swept for the whole univer
                            -- (declared HERE so InvalidateAll clears this local
                            -- and not a stray global - see minLvlCache history)
 local cacheDirty = false   -- structural data changed since the last export
+-- Scan-lifetime classification memo (see BuildItemMemo): one walk over an
+-- item's rows serves every zone that lists it. Created by the first ZoneData
+-- call inside a background job, dropped when the job queue drains.
+local scanMemo, qvMemo
 
 -- /an perf telemetry: Engine's share of the counter table Core.lua owns
 -- (created here too so a Core without it - AttuneNext-Simple's - still loads)
@@ -117,7 +121,7 @@ function Engine.InvalidateAll()
     end
     cachesWarm = false
     warmed = {}            -- every predicate must be swept again
-    srcCacheCap = 3000     -- warmup re-runs; give it the big working set again
+    scanMemo, qvMemo = nil, nil   -- the scan-lifetime classification memo
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -334,6 +338,7 @@ pumpFrame:SetScript("OnUpdate", function(self)
         table.remove(Engine.scanJobs, 1)
         if #Engine.scanJobs == 0 then
             Engine.scanning = false
+            scanMemo, qvMemo = nil, nil
             if perf.readyAt > 0 then perf.idleS = GetTime() - perf.readyAt end
             -- persist the structural cache ONLY when a scan actually changed
             -- it - re-serializing thousands of ids after every filter click
@@ -521,24 +526,43 @@ end
 function Engine.FlushSources()
     srcCache = {}
     srcCacheN, srcCacheRows = 0, 0
-    srcCacheCap = 800
 end
+
+-- Walk an item's source rows straight off the server API without building
+-- the row tables (ANx.GetSources): the per-item predicates below read one or
+-- two fields per row and usually stop at the first row that decides them.
+-- fn(srcType, objType, objId, chance, perMille, objName, zoneName, spawned, i)
+-- returns true to stop early. Returns true if any row was visited.
+-- Building one 9-field table per row was the login scan's dominant cost in
+-- v3.6.x: 42 million row tables for 2.2 million real rows on a live client.
+local function EachSourceRow(itemId, fn)
+    local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
+    if not (getCount and getAt and ANx.LootDbLoaded()) then return false end
+    local n = getCount(itemId) or 0
+    perf.rowReads = perf.rowReads + n
+    local any = false
+    for i = 1, n do
+        local srcType, objType, objId, chance, perMille, objName, zoneName, spawned = getAt(itemId, i)
+        if srcType ~= nil then
+            any = true
+            if fn(srcType, objType, objId, chance or 0, perMille, objName or "?", zoneName or "", spawned, i) then break end
+        end
+    end
+    return any
+end
+Engine.EachSourceRow = EachSourceRow
 
 -- true when EVERY source of the item is a quest reward (can't be forged)
 function Engine.IsQuestOnly(itemId)
     local f = itemFlags[itemId]
     local c = f and band(rshift(f, F_QONLY), 3) or 0
     if c ~= 0 then return c == 2 end
-    local v
-    local srcs = Engine.Sources(itemId)
-    if #srcs == 0 then
-        v = false
-    else
-        v = true
-        for _, src in ipairs(srcs) do
-            if src.srcType ~= ANx.SRC.QUEST then v = false break end
-        end
-    end
+    local SRC_QUEST = ANx.SRC.QUEST
+    local v = true
+    local any = EachSourceRow(itemId, function(srcType)
+        if srcType ~= SRC_QUEST then v = false return true end
+    end)
+    v = any and v
     FSet(itemId, F_QONLY, 3, v and 2 or 1)
     return v
 end
@@ -578,33 +602,39 @@ local function SourceUsable(s)
 end
 
 function Engine.BestSource(itemId, zoneName, srcFilter)
-    local best, bestAny, bestBlocked, bestAnyBlocked
-    -- lower the target once; records carry zoneLower (set in ANx.GetSources)
-    local zTarget = zoneName and zoneName:lower()
-    for _, s in ipairs(Engine.Sources(itemId)) do
-        local typeOk = (not srcFilter) or srcFilter[s.srcType]
-        if typeOk then
-            local zoneHit = zTarget ~= nil and (s.zoneLower or "") == zTarget
-            if SourceUsable(s) then
-                if (not bestAny) or s.chance > bestAny.chance then bestAny = s end
-                if zoneHit then
-                    if (not best) or s.chance > best.chance then best = s end
-                end
+    -- Streams the rows (no tables): keeps the best row INDEX in each of four
+    -- classes, then re-reads the winner. Returns chance, objName, srcType,
+    -- inZone, zoneName, objId.
+    local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
+    if not (getCount and getAt and ANx.LootDbLoaded()) then return nil end
+    local ZoneLower = ANx.ZoneLower
+    local zTarget = zoneName and ZoneLower(zoneName)
+    local SRC_QUEST = ANx.SRC.QUEST
+    local CanDo = ANx.CharCanDoQuest
+    local bC, bI, aC, aI, bbC, bbI, abC, abI   -- zone/usable, any/usable, zone/blocked, any/blocked
+    local n = getCount(itemId) or 0
+    perf.rowReads = perf.rowReads + n
+    for i = 1, n do
+        local srcType, _, objId, chance, _, _, zn = getAt(itemId, i)
+        if srcType ~= nil and ((not srcFilter) or srcFilter[srcType]) then
+            chance = chance or 0
+            local zoneHit = zTarget ~= nil and ZoneLower(zn) == zTarget
+            if srcType ~= SRC_QUEST or not objId or CanDo(objId) then
+                if (not aI) or chance > aC then aC, aI = chance, i end
+                if zoneHit and ((not bI) or chance > bC) then bC, bI = chance, i end
             else
-                if (not bestAnyBlocked) or s.chance > bestAnyBlocked.chance then bestAnyBlocked = s end
-                if zoneHit then
-                    if (not bestBlocked) or s.chance > bestBlocked.chance then bestBlocked = s end
-                end
+                if (not abI) or chance > abC then abC, abI = chance, i end
+                if zoneHit and ((not bbI) or chance > bbC) then bbC, bbI = chance, i end
             end
         end
     end
     -- usable sources always outrank blocked ones; blocked are a last resort
     -- so account-scope displays still have something to show
-    best = best or bestBlocked
-    bestAny = bestAny or bestAnyBlocked
-    if best then return best.chance, best.objName, best.srcType, true, best.zoneName, best end
-    if bestAny then return bestAny.chance, bestAny.objName, bestAny.srcType, false, bestAny.zoneName, bestAny end
-    return nil
+    local idx, inZone = bI or bbI, true
+    if not idx then idx, inZone = aI or abI, false end
+    if not idx then return nil end
+    local srcType, _, objId, chance, _, objName, zn = getAt(itemId, idx)
+    return chance or 0, objName or "?", srcType, inZone, zn or "", objId
 end
 
 -- ---------------------------------------------------------------------
@@ -655,17 +685,20 @@ end
 -- Does this item drop from a rare / rare-elite creature? (optionally in a
 -- specific zone). Used by the World Drops "Rares only" filter.
 function Engine.ItemHasRareSource(itemId, zoneName)
-    if not ANx.RareNPCs then return false end
-    local zTarget = zoneName and zoneName:lower()
-    for _, s in ipairs(Engine.Sources(itemId)) do
-        if (s.srcType == ANx.SRC.CREATURE or s.srcType == ANx.SRC.MYTHIC_CREATURE)
-            and s.objId and ANx.RareNPCs[s.objId] then
-            if not zTarget or (s.zoneLower or "") == zTarget then
-                return true
-            end
+    local rares = ANx.RareNPCs
+    if not rares then return false end
+    local ZoneLower = ANx.ZoneLower
+    local zTarget = zoneName and ZoneLower(zoneName)
+    local C, MC = ANx.SRC.CREATURE, ANx.SRC.MYTHIC_CREATURE
+    local hit = false
+    EachSourceRow(itemId, function(srcType, _, objId, _, _, _, zn)
+        if (srcType == C or srcType == MC) and objId and rares[objId]
+            and (not zTarget or ZoneLower(zn) == zTarget) then
+            hit = true
+            return true
         end
-    end
-    return false
+    end)
+    return hit
 end
 
 -- Filter an item list down to those with a rare source (in zoneName if given).
@@ -681,19 +714,20 @@ end
 -- Considers named zones only; empty/Unknown source zones are ignored.
 function Engine.ItemIsUniqueToZone(itemId, zoneName)
     if not zoneName then return true end
-    local zTarget = zoneName:lower()
-    local inThisZone = false
-    for _, s in ipairs(Engine.Sources(itemId)) do
-        local zn = s.zoneName
+    local ZoneLower = ANx.ZoneLower
+    local zTarget = ZoneLower(zoneName)
+    local inThisZone, elsewhere = false, false
+    EachSourceRow(itemId, function(_, _, _, _, _, _, zn)
         if zn and zn ~= "" and zn ~= "Unknown" and zn ~= "?" then
-            if s.zoneLower == zTarget then
+            if ZoneLower(zn) == zTarget then
                 inThisZone = true
             else
-                return false   -- found a source in a different zone
+                elsewhere = true   -- found a source in a different zone
+                return true
             end
         end
-    end
-    return inThisZone
+    end)
+    return inThisZone and not elsewhere
 end
 
 function Engine.FilterZoneExclusive(items, zoneName)
@@ -711,13 +745,14 @@ function Engine.IsZoneExclusive(itemId)
     local c = f and band(rshift(f, F_ZEX), 3) or 0
     if c ~= 0 then return c == 2 end
     local zone, multiple = nil, false
-    for _, s in ipairs(Engine.Sources(itemId)) do
-        local zn = s.zoneName
+    local ZoneLower = ANx.ZoneLower
+    EachSourceRow(itemId, function(_, _, _, _, _, _, zn)
         if zn and zn ~= "" and zn ~= "Unknown" and zn ~= "?" then
-            if zone == nil then zone = zn:lower()
-            elseif zone ~= zn:lower() then multiple = true break end
+            local zl = ZoneLower(zn)
+            if zone == nil then zone = zl
+            elseif zone ~= zl then multiple = true return true end
         end
-    end
+    end)
     local v = (zone ~= nil) and (not multiple)
     FSet(itemId, F_ZEX, 3, v and 2 or 1)
     return v
@@ -735,16 +770,18 @@ function Engine.ItemQuestSide(itemId)
         FSet(itemId, F_QSIDE, 3, 1)
         return nil
     end
-    local side
-    for _, src in ipairs(Engine.Sources(itemId)) do
-        if src.srcType == ANx.SRC.QUEST then
-            local qs = ANx.QuestFactionSide(src.objId)
-            if not qs or (side and side ~= qs) then
-                FSet(itemId, F_QSIDE, 3, 1)
-                return nil
-            end
+    local side, mixed
+    local SRC_QUEST = ANx.SRC.QUEST
+    EachSourceRow(itemId, function(srcType, _, objId)
+        if srcType == SRC_QUEST then
+            local qs = ANx.QuestFactionSide(objId)
+            if not qs or (side and side ~= qs) then mixed = true return true end
             side = qs
         end
+    end)
+    if mixed then
+        FSet(itemId, F_QSIDE, 3, 1)
+        return nil
     end
     FSet(itemId, F_QSIDE, 3, side == "A" and 2 or side == "H" and 3 or 1)
     return side
@@ -760,12 +797,13 @@ function Engine.ItemQuestCharBlocked(itemId)
     local blocked = false
     if Engine.IsQuestOnly(itemId) then
         blocked = true
-        for _, src in ipairs(Engine.Sources(itemId)) do
-            if src.srcType == ANx.SRC.QUEST and ANx.CharCanDoQuest(src.objId) then
+        local SRC_QUEST = ANx.SRC.QUEST
+        EachSourceRow(itemId, function(srcType, _, objId)
+            if srcType == SRC_QUEST and ANx.CharCanDoQuest(objId) then
                 blocked = false
-                break
+                return true
             end
-        end
+        end)
     end
     FSet(itemId, F_QCHAR, 3, blocked and 2 or 1)
     return blocked
@@ -839,6 +877,105 @@ end
 -- ---------------------------------------------------------------------
 -- Builds and caches the classification for one zone. Safe to call from a
 -- coroutine (yields periodically) or synchronously.
+-- ---- scan-lifetime item memo --------------------------------------------
+-- A world drop is listed by every open-world zone whose creatures carry it,
+-- and v3.6.x re-read (and re-tabled) its rows once per zone: 42 million row
+-- reads for 2.2 million real rows on a live client. Each item is now walked
+-- ONCE while a background job runs, into a compact memo that every zone's
+-- ZoneData reads:
+--   scanMemo[itemId] = string: byte 1 = flags (bit 1: some row names a zone or
+--     instance we know; bits 2-4: union of type bits over ALL rows), then one
+--     (zoneOrdinal, typeBits) byte pair per ANx.Zones entry named by a row.
+--     Type bits: 1 quest, 2 world drop, 4 vendor. "" = no rows.
+--   qvMemo[itemId] = flat array of 4 slots per quest/vendor row, in row
+--     order: kind (1 quest / 2 vendor), zone ordinal (0 = not an ANx.Zones
+--     zone), objId or false, objName. Only items with such rows get one.
+-- Outside a job the same builder runs without storing, so ZoneData keeps
+-- working for a zone the UI asks for after the scan.
+local zoneOrd            -- [zoneLower] -> index in ANx.Zones (built once)
+local ordOf = {}         -- scratch: ordinal -> type bits for the item being walked
+local ordList = {}       -- scratch: ordinals touched, in first-seen order
+local bytes = {}         -- scratch: the memo string's bytes
+local ROW_YIELD = 512    -- rows walked between yields inside a job
+local strchar, unpack = string.char, unpack
+
+local function ZoneOrdinals()
+    if zoneOrd then return zoneOrd end
+    zoneOrd = {}
+    for i, z in ipairs(ANx.Zones or {}) do
+        if z.name then
+            local l = z.name:lower()
+            if not zoneOrd[l] then zoneOrd[l] = i end
+        end
+    end
+    return zoneOrd
+end
+
+local function BuildItemMemo(itemId, inCoroutine)
+    local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
+    if not (getCount and getAt and ANx.LootDbLoaded()) then return "", nil end
+    local ord = ZoneOrdinals()
+    local known = Engine.KnownZoneNameSet()
+    local ZoneLower = ANx.ZoneLower
+    local SRC_QUEST, SRC_VENDOR, WORLD = ANx.SRC.QUEST, ANx.SRC.VENDOR, ANx.WORLD_DROP_SRC
+    local n = getCount(itemId) or 0
+    perf.rowReads = perf.rowReads + n
+    perf.memoItems = perf.memoItems + 1
+    local rec, union, k, qv = false, 0, 0, nil
+    for i = 1, n do
+        if inCoroutine and i % ROW_YIELD == 0 then Engine.YieldNow("memo-rows") end
+        local srcType, _, objId, _, _, objName, zn = getAt(itemId, i)
+        if srcType ~= nil then
+            local zl = ZoneLower(zn)
+            local o = 0
+            if zl ~= "" then
+                o = ord[zl] or 0
+                if known[zl] then rec = true
+                elseif perf.unkN < 8 and not perf.unk[zl] then
+                    -- a zone name the addon does not know (localized client,
+                    -- renamed or new content): keep the first eight for /an perf
+                    perf.unk[zl] = true; perf.unkN = perf.unkN + 1
+                end
+            end
+            local bit = 0
+            if srcType == SRC_QUEST then bit = 1
+            elseif srcType == SRC_VENDOR then bit = 4
+            elseif WORLD[srcType] then bit = 2 end
+            if bit ~= 0 then
+                if band(union, bit) == 0 then union = union + bit end
+                if srcType == SRC_QUEST or srcType == SRC_VENDOR then
+                    qv = qv or {}
+                    local m = #qv
+                    qv[m + 1], qv[m + 2], qv[m + 3], qv[m + 4] = (bit == 1) and 1 or 2, o, objId or false, objName or "?"
+                end
+            end
+            if o ~= 0 then
+                local cur = ordOf[o]
+                if not cur then
+                    k = k + 1; ordList[k] = o; ordOf[o] = bit
+                elseif bit ~= 0 and band(cur, bit) == 0 then
+                    ordOf[o] = cur + bit
+                end
+            end
+        end
+    end
+    local m
+    if n == 0 then
+        m = ""
+    else
+        bytes[1] = (rec and 1 or 0) + union * 2
+        local b = 1
+        for j = 1, k do
+            local o = ordList[j]
+            bytes[b + 1], bytes[b + 2] = o, ordOf[o]
+            b = b + 2
+            ordOf[o] = nil
+        end
+        m = strchar(unpack(bytes, 1, b))
+    end
+    return m, qv
+end
+
 function Engine.ZoneData(zoneEntry, inCoroutine)
     local zc = zoneCache[zoneEntry.zone]
     if zc then return zc end
@@ -856,71 +993,80 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
         vendorIdByName = {}, -- [vendorName] = npcId
     }
     local questsById = {}
-    local known = Engine.KnownZoneNameSet()
     local zLower = (zoneEntry.name or ""):lower()
+    local o = ZoneOrdinals()[zLower] or -1   -- -1: a name outside ANx.Zones never matches a pair
+    local quest, world, vendor, questList, vendorByName, vendorIdByName =
+        zc.quest, zc.world, zc.vendor, zc.questList, zc.vendorByName, zc.vendorIdByName
+    if inCoroutine and not scanMemo then scanMemo, qvMemo = {}, {} end
+    local memo, qvm = scanMemo, qvMemo
+    local strbyte, floor = string.byte, math.floor
     local zMatched = 0
     for _, itemId in ipairs(universe) do
         if inCoroutine then Engine.MaybeYield("zone-items") end
-        local sources = Engine.Sources(itemId)
+        local m, qv
+        if memo then
+            m = memo[itemId]
+            if m then qv = qvm[itemId]
+            else
+                m, qv = BuildItemMemo(itemId, inCoroutine)
+                memo[itemId] = m
+                if qv then qvm[itemId] = qv end
+            end
+        else
+            m, qv = BuildItemMemo(itemId, inCoroutine)
+        end
         -- The loot DB already scoped this item to THIS zone by its numeric id,
-        -- so it belongs here. We name-match source rows only to attribute the
+        -- so it belongs here. Rows are name-matched only to attribute the
         -- correct source type. On a localized client the server's source
         -- zoneNames won't match the addon's English names, so nothing would
-        -- classify: detect that (no source names a zone we recognise) and fall
-        -- back to the item's own source types.
-        local matchedThisZone, recognized = false, false
-        for _, s in ipairs(sources) do
-            local zl = s.zoneLower
-            if zl and zl ~= "" then
-                if zl == zLower then matchedThisZone = true end
-                if known[zl] then recognized = true
-                elseif perf.unkN < 8 and not perf.unk[zl] then
-                    -- a zone name the addon does not know (localized client,
-                    -- renamed or new content): keep the first eight for /an perf
-                    perf.unk[zl] = true; perf.unkN = perf.unkN + 1
-                end
-            end
+        -- classify: detect that (no row names a zone we recognise) and fall
+        -- back to the item's own source types (the memo's union bits).
+        local flags = strbyte(m, 1) or 0
+        local recognized = flags % 2 == 1
+        local bits, matched = 0, false
+        for p = 2, #m, 2 do
+            if strbyte(m, p) == o then matched = true; bits = strbyte(m, p + 1); break end
         end
-        local fallback = (not matchedThisZone) and (not recognized)
+        local fallback = (not matched) and (not recognized)
         perf.zoneItems = perf.zoneItems + 1
-        if matchedThisZone then zMatched = zMatched + 1
+        if matched then zMatched = zMatched + 1
         elseif fallback then perf.zoneFallback = perf.zoneFallback + 1
         else perf.zoneUnmatched = perf.zoneUnmatched + 1 end
-        local isQuest, isWorld, isVendor = false, false, false
-        for _, s in ipairs(sources) do
-            if fallback or s.zoneLower == zLower then
-                -- a quest row with no objId would make questsById[nil] raise
-                -- inside the summary coroutine and wedge the whole scan
-                if s.srcType == ANx.SRC.QUEST and s.objId then
-                    isQuest = true
-                    local q = questsById[s.objId]
-                    if not q then
-                        q = { id = s.objId, name = s.objName, items = {} }
-                        questsById[s.objId] = q
-                        zc.questList[#zc.questList + 1] = q
+        if fallback then bits = floor(flags / 2) end
+        local isQuest, isWorld, isVendor = bits % 2 == 1, floor(bits / 2) % 2 == 1, floor(bits / 4) % 2 == 1
+        if qv and (isQuest or isVendor) then
+            for p = 1, #qv, 4 do
+                if fallback or qv[p + 1] == o then
+                    local kind, objId, objName = qv[p], qv[p + 2], qv[p + 3]
+                    if kind == 1 then
+                        -- a quest row with no objId is counted (isQuest) but
+                        -- not indexed: questsById[nil] would raise in the job
+                        if objId then
+                            local q = questsById[objId]
+                            if not q then
+                                q = { id = objId, name = objName, items = {} }
+                                questsById[objId] = q
+                                questList[#questList + 1] = q
+                            end
+                            q.items[#q.items + 1] = itemId
+                        end
+                    else
+                        local list = vendorByName[objName]
+                        if not list then
+                            list = {}
+                            vendorByName[objName] = list
+                        end
+                        list[#list + 1] = itemId
+                        if objId and objId > 0 and not vendorIdByName[objName] then
+                            vendorIdByName[objName] = objId
+                        end
                     end
-                    q.items[#q.items + 1] = itemId
-                elseif s.srcType == ANx.SRC.QUEST then
-                    isQuest = true   -- unclassifiable quest row: count, don't index
-                elseif s.srcType == ANx.SRC.VENDOR then
-                    isVendor = true
-                    local list = zc.vendorByName[s.objName]
-                    if not list then
-                        list = {}
-                        zc.vendorByName[s.objName] = list
-                    end
-                    list[#list + 1] = itemId
-                    if s.objId and s.objId > 0 and not zc.vendorIdByName[s.objName] then
-                        zc.vendorIdByName[s.objName] = s.objId
-                    end
-                elseif ANx.WORLD_DROP_SRC[s.srcType] then
-                    isWorld = true
                 end
             end
         end
-        if isQuest then zc.quest[#zc.quest + 1] = itemId end
-        if isWorld then zc.world[#zc.world + 1] = itemId end
-        if isVendor then zc.vendor[#zc.vendor + 1] = itemId end
+        if isQuest then quest[#quest + 1] = itemId end
+        if isWorld then world[#world + 1] = itemId end
+        if isVendor then vendor[#vendor + 1] = itemId end
     end
     table.sort(zc.questList, function(a, b) return (a.name or "") < (b.name or "") end)
     if zMatched == 0 and #universe > 0 and perf.unmatchedN < 8 then
@@ -1009,14 +1155,13 @@ end
 -- quests need Leatherworking 300): their loot-DB source is a quest, not a craft
 -- spell, so they belong under Quests, not under Crafting.
 function Engine.IsCraftObtained(itemId)
-    local sources = Engine.Sources(itemId)
-    if #sources == 0 then return true end   -- loot DB gap: benefit of the doubt
-    for _, s in ipairs(sources) do
-        if s.srcType == ANx.SRC.CRAFT_TRAINER or s.srcType == ANx.SRC.CRAFT_RECIPE then
-            return true
-        end
-    end
-    return false
+    local T, R = ANx.SRC.CRAFT_TRAINER, ANx.SRC.CRAFT_RECIPE
+    local craft = false
+    local any = EachSourceRow(itemId, function(srcType)
+        if srcType == T or srcType == R then craft = true return true end
+    end)
+    if not any then return true end   -- loot DB gap: benefit of the doubt
+    return craft
 end
 
 function Engine.ProfessionEntries(prof, exp)
@@ -1947,11 +2092,9 @@ local DROP_SRC = { [0] = true, [1] = true, [3] = true, [7] = true, [8] = true,
 -- best drop chance for an item among its drop-type sources, or nil (no drop rate)
 function Engine.ItemBestDropChance(itemId)
     local best
-    for _, s in ipairs(Engine.Sources(itemId)) do
-        if DROP_SRC[s.srcType] and s.chance and s.chance > 0 then
-            if not best or s.chance > best then best = s.chance end
-        end
-    end
+    EachSourceRow(itemId, function(srcType, _, _, chance)
+        if DROP_SRC[srcType] and chance > 0 and ((not best) or chance > best) then best = chance end
+    end)
     return best
 end
 
@@ -2043,10 +2186,13 @@ function Engine.AttuneNextPick(view, opts)
     -- items and crafted items have none; if that would leave nothing, the selected
     -- category wins - fall back to the full eligible pool instead of dead-ending.
     local rankByDrop = false
+    local dropOf = {}
     if a.dropRate then
         local dp = {}
         for _, id in ipairs(pool) do
-            if Engine.ItemBestDropChance(id) then dp[#dp + 1] = id end
+            if yielding then Engine.MaybeYield("pick") end
+            local c = Engine.ItemBestDropChance(id)
+            if c then dp[#dp + 1] = id; dropOf[id] = c end
         end
         if #dp > 0 then pool = dp; rankByDrop = true end
     end
@@ -2070,7 +2216,7 @@ function Engine.AttuneNextPick(view, opts)
         -- deterministic: the easiest (highest drop rate) item, so Ignore steps
         -- through best -> next best
         table.sort(pool, function(x, y)
-            return (Engine.ItemBestDropChance(x) or 0) > (Engine.ItemBestDropChance(y) or 0)
+            return (dropOf[x] or 0) > (dropOf[y] or 0)
         end)
         return pool[1], #pool
     end
@@ -2181,7 +2327,7 @@ function Engine.ClearChance(itemId, zoneName, srcFilter)
     local ck = itemId .. "|" .. (zoneName or "")
     local hit = clearChanceCache[ck]
     if hit then return hit[1], hit[2] end
-    local chance, srcName, srcType, restricted, zname, src = Engine.BestSource(itemId, zoneName, srcFilter)
+    local chance, srcName, srcType, restricted, zname, objId = Engine.BestSource(itemId, zoneName, srcFilter)
     local out
     if not chance or chance <= 0 then
         out = 0
@@ -2190,7 +2336,7 @@ function Engine.ClearChance(itemId, zoneName, srcFilter)
         if p >= 1 then
             out = 1
         else
-            local n = Engine.SpawnCount(src and src.objId)
+            local n = Engine.SpawnCount(objId)
             out = (n <= 1) and p or (1 - (1 - p) ^ n)
         end
     end

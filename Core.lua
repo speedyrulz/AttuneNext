@@ -269,6 +269,7 @@ local perf = {
     statusExportMs = 0, statusExportN = 0,
     readyAt = 0, readyN = 0,                                 -- GetTime() of the last data-ready
     zfN = 0, zfMs = 0, zfMaxMs = 0, zfMaxZone = 0,           -- ItemLocGetAllItemsInZone calls
+    rowReads = 0, memoItems = 0,                             -- streamed source rows read, scan memos built
 }
 ANx.Perf = perf
 local function PerfClock()
@@ -1600,6 +1601,8 @@ local function ZoneLower(zoneName)
     return l
 end
 
+ANx.ZoneLower = ZoneLower   -- shared with Engine's streaming row walks
+
 function ANx.GetSources(itemId)
     if not ANx.LootDbLoaded() then return {} end
     local n = _G.ItemLocGetSourceCount(itemId)
@@ -2063,6 +2066,8 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
                 st.afterN, st.afterMs, st.afterMaxMs, st.afterMaxName, st.exportMs, st.statusExportMs, st.statusExportN))
             ANx.Print(string.format("zone fetches: %d calls, %.0fms, max %.1fms (zone %s); longest resume ended at '%s', Lua %d KB -> %d KB; peak Lua %d KB during %s",
                 st.zfN, st.zfMs, st.zfMaxMs, tostring(st.zfMaxZone), st.resumeMaxSite, st.resumeMaxKbIn, st.resumeMaxKbOut, st.peakKb, st.peakTag))
+            ANx.Print(string.format("streaming: %d source rows read without tables, %d items memoized for the scan",
+                st.rowReads, st.memoItems))
             collectgarbage("collect")
             ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
         end
