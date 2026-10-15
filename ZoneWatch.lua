@@ -37,7 +37,7 @@ local function ZoneEntryByName(zname)
 end
 
 -- returns itemIds still left here, and "instance" | "zone" (nil if unknown)
-local function LeftItems(zname)
+local function LeftItems(zname, yielding)
     local Engine = ANx.Engine
     if not Engine then return nil end
     local inst = InstanceByName(zname)
@@ -46,6 +46,7 @@ local function LeftItems(zname)
         for _, d in ipairs(Engine.InstanceDiffs(inst) or {}) do
             if ANx.DifficultyMatches(d.label, inst.map) then
                 for _, id in ipairs(d.items) do
+                    if yielding then Engine.MaybeYield("zone-watch") end
                     if not seen[id] and Engine.Eligible(id) and not ANx.CountDone(id) then
                         seen[id] = true
                         out[#out + 1] = id
@@ -59,6 +60,7 @@ local function LeftItems(zname)
     if z then
         local out = {}
         for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
+            if yielding then Engine.MaybeYield("zone-watch") end
             if Engine.Eligible(id) and not ANx.CountDone(id) then
                 out[#out + 1] = id
             end
@@ -230,6 +232,9 @@ end
 -- ---------------------------------------------------------------------
 -- Update (debounced: zone events fire in bursts around loading screens)
 -- ---------------------------------------------------------------------
+local zwItems, zwKind, zwZone   -- result of the background walk
+local ZoneWatchShow
+
 function ANx.ZoneWatchNow(announce)
     local db = ANx.db
     local wantNote = db and db.zonewatch
@@ -244,7 +249,27 @@ function ANx.ZoneWatchNow(announce)
         if hud then hud:Hide() end
         return
     end
+    local Engine = ANx.Engine
+    if Engine and Engine.Enqueue and (Engine.scanning or not Engine.CachesWarm() or Engine.WarmupIncomplete()) then
+        -- caches cold (login, or a filter just switched on): the walk would
+        -- read thousands of tooltips in this one frame - 800 ms seen in game.
+        -- Run it as a pump job; the note and HUD follow when it finishes.
+        Engine.Enqueue(function()
+            zwItems, zwKind, zwZone = nil, nil, zname
+            zwItems, zwKind = LeftItems(zname, true)
+        end, function()
+            if zwZone == zname then ZoneWatchShow(zname, zwItems, zwKind, announce) end
+        end, "zone-watch")
+        return
+    end
     local items, kind = LeftItems(zname)
+    ZoneWatchShow(zname, items, kind, announce)
+end
+
+ZoneWatchShow = function(zname, items, kind, announce)
+    local db = ANx.db
+    local wantNote = db and db.zonewatch
+    local wantHud = db and db.zoneHud
 
     -- one chat note per zone entered
     if wantNote and announce and zname ~= lastZone and items and #items > 0 then

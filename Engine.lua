@@ -241,7 +241,7 @@ end
 
 -- Full manual rescan (Refresh button / "/an reset")
 function Engine.ForceRescan()
-    if ANx.db then ANx.db.structCache = nil end
+    if ANx.db then ANx.db.structCache = nil; ANx.db.tipCache = nil end
     if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
     if ANx.InvalidateClassLockCache then ANx.InvalidateClassLockCache() end
     if ANx.InvalidateAccessoryCache then ANx.InvalidateAccessoryCache() end
@@ -846,32 +846,49 @@ end
 -- Equipped items are not counted by GetItemCount on 3.3.5, so the 19
 -- inventory slots are read once per pass and cached until the next
 -- bag / equipment event.
-local equippedSet
-local function EquippedSet()
-    if equippedSet then return equippedSet end
-    equippedSet = {}
-    if _G.GetInventoryItemLink then
+-- One set of owned item ids per bag/bank/equipment change, built by walking
+-- the containers (about 300 client calls). The previous IsOwned asked
+-- GetItemCount per item per eligibility check: 19-36 thousand calls per
+-- render with "In bags: Hide" on. Bank contents are known to the client
+-- once the bank has been opened this session, as before.
+local ownedSet
+local function OwnedSet()
+    if ownedSet then return ownedSet end
+    ownedSet = {}
+    perf.ownedCalls = perf.ownedCalls + 1
+    local invLink = _G.GetInventoryItemLink
+    if invLink then
         for slot = 1, 19 do
-            local ok, link = pcall(_G.GetInventoryItemLink, "player", slot)
+            local ok, link = pcall(invLink, "player", slot)
             local id = ok and link and tonumber(link:match("item:(%d+)"))
-            if id then equippedSet[id] = true end
+            if id then ownedSet[id] = true end
         end
     end
-    return equippedSet
+    local numSlots, cLink = _G.GetContainerNumSlots, _G.GetContainerItemLink
+    if numSlots and cLink then
+        local function walk(bag)
+            local ok, n = pcall(numSlots, bag)
+            if not ok or not n then return end
+            for slot = 1, n do
+                local ok2, link = pcall(cLink, bag, slot)
+                local id = ok2 and link and tonumber(link:match("item:(%d+)"))
+                if id then ownedSet[id] = true end
+            end
+        end
+        local nBags = _G.NUM_BAG_SLOTS or 4
+        for bag = 0, nBags do walk(bag) end
+        walk(_G.BANK_CONTAINER or -1)
+        for bag = nBags + 1, nBags + (_G.NUM_BANKBAGSLOTS or 7) do walk(bag) end
+    end
+    return ownedSet
 end
 
 function Engine.InvalidateOwned()
-    equippedSet = nil
+    ownedSet = nil
 end
 
 function Engine.IsOwned(itemId)
-    if EquippedSet()[itemId] then return true end
-    if _G.GetItemCount then
-        perf.ownedCalls = perf.ownedCalls + 1
-        local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
-        if ok and type(c) == "number" and c > 0 then return true end
-    end
-    return false
+    return OwnedSet()[itemId] == true
 end
 
 function Engine.Eligible(itemId)

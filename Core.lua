@@ -674,6 +674,8 @@ function ANx.ExportStatusCache()
     scSets = nil
     perf.statusExportMs = PerfClock() - t0
     perf.statusExportN = perf.statusExportN + 1
+    -- the warmup has just filled the tooltip-derived flags: save them too
+    ANx.ExportTipCache()
 end
 
 -- Can the CURRENT CHARACTER attune this item (class/armor/level checks)?
@@ -1141,6 +1143,72 @@ function ANx.ClassLock(itemId)
 end
 
 -- Can gear of this item's kind be used by `token`? (see block comment above)
+-- ---------------------------------------------------------------------
+-- Persisted tooltip results. Bind type, faction lock and class lock are
+-- read off item tooltips (one SetHyperlink per item): with a Bind or
+-- Faction filter saved, every login re-read 18-22 thousand tooltips. An
+-- item's tooltip never changes, so the results are saved as packed strings
+-- at scan end and logout and restored into the flag cache at load.
+-- Rescan loot DB (/an rescan) drops them.
+-- ---------------------------------------------------------------------
+function ANx.ExportTipCache()
+    if not (ANx.db and ANx.Engine) then return end
+    local universe, ready = ANx.Engine.Universe()
+    if not ready then return end
+    local MaybeYield = ANx.Engine.MaybeYield    -- no-op on the main thread (logout)
+    local F_FAC = ANx.F_FAC
+    local bind, fac, cls = {}, {}, {}
+    for i, id in ipairs(universe) do
+        if i % 256 == 0 then MaybeYield("tip-export") end
+        local f = itemFlags[id]
+        if f then
+            local b = band(f, 7)                 -- F_BIND: 2 BOP, 3 BOE, 4 NONE (1 = retry, not saved)
+            if b >= 2 then bind[#bind + 1] = id .. ":" .. b end
+            local c = band(rshift(f, F_FAC), 3)  -- 1 neutral, 2 Alliance, 3 Horde
+            if c ~= 0 then fac[#fac + 1] = id .. ":" .. c end
+        end
+    end
+    for id, lock in pairs(classLockCache) do
+        if lock == false then
+            cls[#cls + 1] = id .. ":-"
+        elseif type(lock) == "table" then
+            local t = {}
+            for token in pairs(lock) do t[#t + 1] = token end
+            table.sort(t)
+            cls[#cls + 1] = id .. ":" .. table.concat(t, "/")
+        end
+    end
+    ANx.db.tipCache = {
+        ver = ANx.VERSION,
+        bind = table.concat(bind, ","), fac = table.concat(fac, ","), cls = table.concat(cls, ","),
+    }
+end
+
+function ANx.ImportTipCache()
+    local tc = ANx.db and ANx.db.tipCache
+    if not tc then return 0 end
+    if tc.ver ~= ANx.VERSION then ANx.db.tipCache = nil return 0 end
+    local n = 0
+    for id, v in (tc.bind or ""):gmatch("(%d+):(%d)") do
+        ANx.FlagSet(tonumber(id), ANx.F_BIND, 7, tonumber(v)); n = n + 1
+    end
+    for id, v in (tc.fac or ""):gmatch("(%d+):(%d)") do
+        ANx.FlagSet(tonumber(id), ANx.F_FAC, 3, tonumber(v)); n = n + 1
+    end
+    for id, v in (tc.cls or ""):gmatch("(%d+):([^,]+)") do
+        id = tonumber(id)
+        if v == "-" then
+            classLockCache[id] = false
+        else
+            local lock = {}
+            for token in v:gmatch("[^/]+") do lock[token] = true end
+            classLockCache[id] = lock
+        end
+        n = n + 1
+    end
+    return n
+end
+
 function ANx.ItemUsableByClass(itemId, token)
     if not token or token == "all" then return true end
     local lock = ANx.ClassLock(itemId)
@@ -1724,6 +1792,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
         _G.AttuneNextDB = _G.AttuneNextDB or {}
         ApplyDefaults(_G.AttuneNextDB, defaults)
         ANx.db = _G.AttuneNextDB
+        if ANx.ImportTipCache then ANx.ImportTipCache() end   -- saved tooltip results
         -- one-time: the recommendation cards used to share the button's config
         if not ANx.db.recSeeded then
             ANx.db.recSeeded = true
@@ -1835,6 +1904,7 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "PLAYER_LOGOUT" then
         if ANx.Engine then pcall(ANx.Engine.ExportCache) end
         pcall(ANx.ExportStatusCache)
+        pcall(ANx.ExportTipCache)
     elseif event == "PLAYER_MONEY" or event == "CURRENCY_DISPLAY_UPDATE" then
         ANx.InvalidatePlayerCurrency()
         -- coalesced: while farming, every coin looted fires this (bursts per
@@ -2068,7 +2138,7 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
                 st.gsCalls, st.gsEmpty, st.gsRows, st.gsMaxRows, st.gsMaxItem, st.srcCache, st.srcRows, st.srcFlush, st.srcTooBig))
             ANx.Print(string.format("zones: %d items classified, %d by fallback, %d recognised-unmatched; unknown names: %s; zones with no match: %s",
                 st.zoneItems, st.zoneFallback, st.zoneUnmatched, st.unknownZones, st.unmatchedZones))
-            ANx.Print(string.format("client: tooltip scans bind %d / class %d / faction %d (empty %d), cache requests %d, GetItemCount %d",
+            ANx.Print(string.format("client: tooltip scans bind %d / class %d / faction %d (empty %d), cache requests %d, owned-set builds %d",
                 st.tipBind, st.tipClass, st.tipFac, st.tipEmpty, st.cacheReq, st.ownedCalls))
             ANx.Print(string.format("timers: %d callbacks, %.0fms, slowest %.1fms (%s); exports: struct %.0fms, status %.0fms x%d",
                 st.afterN, st.afterMs, st.afterMaxMs, st.afterMaxName, st.exportMs, st.statusExportMs, st.statusExportN))
