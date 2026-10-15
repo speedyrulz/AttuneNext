@@ -74,6 +74,11 @@ perf.pumpFrames, perf.pumpOver, perf.pumpMs, perf.pumpMaxMs, perf.pumpMaxTag = 0
 perf.resumeMaxMs, perf.resumeMaxTag = 0, "-"
 perf.resumeMaxSite, perf.resumeMaxKbIn, perf.resumeMaxKbOut = "-", 0, 0  -- yield site that ended it, Lua KB before/after
 perf.peakKb, perf.peakTag = 0, "-"                   -- highest Lua heap seen by the pump, and the job running
+-- counters Core.lua normally seeds; initialised here too so this file runs
+-- unchanged on AttuneNext-Simple, whose Core carries no telemetry
+perf.rowReads, perf.memoItems = perf.rowReads or 0, perf.memoItems or 0
+perf.idxItems, perf.idxFlush, perf.idxHits = perf.idxItems or 0, perf.idxFlush or 0, perf.idxHits or 0
+perf.zfN, perf.zfMs, perf.zfMaxMs, perf.zfMaxZone = perf.zfN or 0, perf.zfMs or 0, perf.zfMaxMs or 0, perf.zfMaxZone or 0
 perf.gcMs, perf.gcMaxMs = 0, 0
 perf.exportMs, perf.summariesS, perf.idleS = 0, 0, 0
 
