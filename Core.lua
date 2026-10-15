@@ -660,12 +660,15 @@ function ANx.ExportStatusCache()
         local f = (_G.GetItemAttuneForge and _G.GetItemAttuneForge(id)) or 0
         if f >= 1 then forge[#forge + 1] = id .. ":" .. f end
     end
+    -- five 20k-id concatenations: one per slice, so the job's last resume
+    -- is not a 25 ms frame (no-ops at logout, off the pump)
+    local sTags = "," .. table.concat(tags, ",") .. ","; MaybeYield("status-export")
+    local sCan = "," .. table.concat(can, ",") .. ","; MaybeYield("status-export")
+    local sAcct = "," .. table.concat(acct, ",") .. ","; MaybeYield("status-export")
+    local sProg = table.concat(prog, ","); MaybeYield("status-export")
     ANx.db.statusCache = {
         char = (_G.UnitName and _G.UnitName("player")) or "?",
-        tags = "," .. table.concat(tags, ",") .. ",",
-        can = "," .. table.concat(can, ",") .. ",",
-        acct = "," .. table.concat(acct, ",") .. ",",
-        prog = table.concat(prog, ","),
+        tags = sTags, can = sCan, acct = sAcct, prog = sProg,
         forge = table.concat(forge, ","),
     }
     scSets = nil
