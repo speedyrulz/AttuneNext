@@ -181,7 +181,7 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
-**v3.7.0**
+**v4.0.0**
 
 *The login scan is rebuilt around reading the server's loot database without copying it. On the Oct 14 in-game reading the old scan read 42 million source rows (for 2.2 million real ones), built a Lua table for each, ran for three minutes at 36 ms a frame with one 3.8-second freeze, and re-read 40,000 item tooltips. Each of those has a fix below. Your saved scan is rebuilt once on first login (the version changed).*
 
@@ -191,7 +191,7 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 - **"In bags: Hide" no longer asks the client about every item on every render.** One owned-items set is built per bag, bank or equipment change by walking your containers.
 - **The zone-entry note no longer freezes the frame at login.** While caches are cold its item walk runs in the background and the note and instance HUD appear when it finishes (803 ms on the main thread in the Oct 14 reading).
 - **Cached logins warm their caches too.** A login that restores the saved structure runs no scan, so the first screen used to compute every filter predicate cold.
-- **The zone-fetch API is called once per zone per session.** On the live client `ItemLocGetAllItemsInZone` costs 60-140 ms per call; the first v3.7.0 reading spent 24 s of a 40 s scan in 400 such calls, and 7 s of a cached relog in 74. Each zone and instance difficulty is now fetched once, and each uncached instance fetch gets its own frame instead of three in one resume.
+- **The zone-fetch API is called once per zone per session.** On the live client `ItemLocGetAllItemsInZone` costs 60-140 ms per call; the first v4.0 test reading spent 24 s of a 40 s scan in 400 such calls, and 7 s of a cached relog in 74. Each zone and instance difficulty is now fetched once, and each uncached instance fetch gets its own frame instead of three in one resume.
 - **Best-source lookups come from a per-item index.** Zone lists, rankings and the instance HUD ask "best source of this item in this zone" once per zone, and each call used to walk the item's whole row list (4.3 million rows for one run ranking). One walk per item now builds a small index that answers every zone and filter question. Results verified identical.
 - **More telemetry in `/an perf`:** zone-fetch timing, which yield site ended the longest resume and how the heap moved inside it, peak Lua memory, streamed row counts, and every deferred timer now has a name.
 

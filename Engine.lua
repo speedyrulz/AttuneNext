@@ -16,7 +16,7 @@ local zoneCache     = {}   -- [zoneId]        -> { universe, quest, questList, w
 local srcCache      = {}   -- [itemId]        -> sources array (bounded, see Sources)
 local srcCacheN     = 0    -- entries in srcCache
 local srcCacheRows  = 0    -- source records held across all cached entries
-local srcCacheCap   = 32   -- flush past this. Since v3.7.0 every scan, count
+local srcCacheCap   = 32   -- flush past this. Since v4.0.0 every scan, count
                            -- and filter streams rows straight off the server
                            -- API (EachSourceRow / BuildItemMemo); only the item
                            -- detail page and the arrow router still want a
