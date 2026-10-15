@@ -181,6 +181,12 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v3.6.3**
+
+- Measurement-only release, no behaviour changes. `/an perf` now reports what the login scan actually did on your client: source rows read per item and the heaviest item, how often the source cache flushed, how many items were classified by zone name versus the localized fallback (with samples of unknown zone names), pump time per frame with the worst frame and its job, garbage-collector time, the slowest deferred callback, tooltip scans and cache requests, and the cost of the two exports. `/an perf reset` zeroes the counters.
+- New `/an srcstats`: a background walk of the loot database that prints rows-per-item buckets, the heaviest items and how many zones list them. One reading of these two commands after a fresh-scan login (`/an reset` first) sizes the cache limits for the performance work planned for v3.7.0 (see `docs/perf-audit/REPORT.md`).
+- The version bump rebuilds the saved scan once on first login.
+
 **v3.6.2**
 
 - Fixed an out-of-memory crash at login ("Not enough memory resources", with *Universe* named as the current function). The background scan rebuilds every item's source list, and world-drop items can list thousands of creatures. The source cache was capped by item count only, so it could hold millions of records, and the scan's short-lived garbage was left to pile up. The cache is now capped by record count too, a redundant pre-load of every item's sources was removed, and the collector gets a small step each scan frame. In testing this roughly halved peak memory during login.

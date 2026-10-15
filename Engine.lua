@@ -57,6 +57,20 @@ local warmed = {}          -- [predicate] = true once swept for the whole univer
                            -- and not a stray global - see minLvlCache history)
 local cacheDirty = false   -- structural data changed since the last export
 
+-- /an perf telemetry: Engine's share of the counter table Core.lua owns
+-- (created here too so a Core without it - AttuneNext-Simple's - still loads)
+ANx.Perf = ANx.Perf or { readyAt = 0 }
+local perf = ANx.Perf
+perf.srcFlush, perf.srcTooBig = 0, 0                 -- Sources(): wholesale flushes, items never cached
+perf.zoneItems, perf.zoneFallback, perf.zoneUnmatched = 0, 0, 0
+perf.unk, perf.unkN = {}, 0                          -- bounded sample of zone names we do not know
+perf.unmatched, perf.unmatchedN = {}, 0              -- bounded sample of OUR zones no row ever named
+perf.ownedCalls = 0                                  -- GetItemCount from IsOwned
+perf.pumpFrames, perf.pumpOver, perf.pumpMs, perf.pumpMaxMs, perf.pumpMaxTag = 0, 0, 0, 0, "-"
+perf.resumeMaxMs, perf.resumeMaxTag = 0, "-"
+perf.gcMs, perf.gcMaxMs = 0, 0
+perf.exportMs, perf.summariesS, perf.idleS = 0, 0, 0
+
 -- Bumped whenever anything that affects counts changes (filters, attunes,
 -- scans). Caches key off it instead of being cleared everywhere by hand.
 Engine.rev = 0
@@ -271,9 +285,13 @@ pumpFrame:SetScript("OnUpdate", function(self)
     end
     Engine.scanning = true
     local start = Clock()
-    while Clock() - start < BUDGET_MS do
+    local now = start
+    while now - start < BUDGET_MS do
         if coroutine.status(job.co) == "dead" then break end
         local ok, err = coroutine.resume(job.co)
+        local t = Clock()   -- (the loop condition read the clock here anyway)
+        if t - now > perf.resumeMaxMs then perf.resumeMaxMs = t - now; perf.resumeMaxTag = tostring(job.tag) end
+        now = t
         if not ok then
             ANx.Print("|cffff4040scan error:|r " .. tostring(err))
             break
@@ -284,16 +302,28 @@ pumpFrame:SetScript("OnUpdate", function(self)
     -- times the live data during login; a small step per scan frame keeps it
     -- bounded (cheap: only runs while a background job is active).
     collectgarbage("step", GC_STEP_KB)
+    local gcEnd = Clock()
+    local gcMs, frameMs = gcEnd - now, gcEnd - start
+    perf.pumpFrames = perf.pumpFrames + 1
+    perf.pumpMs = perf.pumpMs + frameMs
+    perf.gcMs = perf.gcMs + gcMs
+    if gcMs > perf.gcMaxMs then perf.gcMaxMs = gcMs end
+    if frameMs > perf.pumpMaxMs then perf.pumpMaxMs = frameMs; perf.pumpMaxTag = tostring(job.tag) end
+    if frameMs > BUDGET_MS * 2 then perf.pumpOver = perf.pumpOver + 1 end
     if coroutine.status(job.co) == "dead" then
         table.remove(Engine.scanJobs, 1)
         if #Engine.scanJobs == 0 then
             Engine.scanning = false
+            if perf.readyAt > 0 then perf.idleS = GetTime() - perf.readyAt end
             -- persist the structural cache ONLY when a scan actually changed
             -- it - re-serializing thousands of ids after every filter click
             -- was a serious source of GC hitches and SavedVariables bloat
             if cacheDirty then
                 cacheDirty = false
+                if perf.readyAt > 0 then perf.summariesS = GetTime() - perf.readyAt end
+                local t0 = Clock()
                 pcall(Engine.ExportCache)
+                perf.exportMs = Clock() - t0
             end
             -- FIRST: walk every item once in the background to fill the
             -- per-item filter caches (faction/bind tooltip scans, sources,
@@ -452,10 +482,13 @@ function Engine.Sources(itemId)
             if srcCacheN >= srcCacheCap or srcCacheRows + rows > SRC_ROW_BUDGET then
                 srcCache = {}
                 srcCacheN, srcCacheRows = 0, 0
+                perf.srcFlush = perf.srcFlush + 1
             end
             srcCache[itemId] = s
             srcCacheN = srcCacheN + 1
             srcCacheRows = srcCacheRows + rows
+        else
+            perf.srcTooBig = perf.srcTooBig + 1
         end
     end
     return s
@@ -746,6 +779,7 @@ end
 function Engine.IsOwned(itemId)
     if EquippedSet()[itemId] then return true end
     if _G.GetItemCount then
+        perf.ownedCalls = perf.ownedCalls + 1
         local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
         if ok and type(c) == "number" and c > 0 then return true end
     end
@@ -804,6 +838,7 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
     local questsById = {}
     local known = Engine.KnownZoneNameSet()
     local zLower = (zoneEntry.name or ""):lower()
+    local zMatched = 0
     for _, itemId in ipairs(universe) do
         if inCoroutine then Engine.MaybeYield() end
         local sources = Engine.Sources(itemId)
@@ -818,10 +853,19 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
             local zl = s.zoneLower
             if zl and zl ~= "" then
                 if zl == zLower then matchedThisZone = true end
-                if known[zl] then recognized = true end
+                if known[zl] then recognized = true
+                elseif perf.unkN < 8 and not perf.unk[zl] then
+                    -- a zone name the addon does not know (localized client,
+                    -- renamed or new content): keep the first eight for /an perf
+                    perf.unk[zl] = true; perf.unkN = perf.unkN + 1
+                end
             end
         end
         local fallback = (not matchedThisZone) and (not recognized)
+        perf.zoneItems = perf.zoneItems + 1
+        if matchedThisZone then zMatched = zMatched + 1
+        elseif fallback then perf.zoneFallback = perf.zoneFallback + 1
+        else perf.zoneUnmatched = perf.zoneUnmatched + 1 end
         local isQuest, isWorld, isVendor = false, false, false
         for _, s in ipairs(sources) do
             if fallback or s.zoneLower == zLower then
@@ -859,6 +903,11 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
         if isVendor then zc.vendor[#zc.vendor + 1] = itemId end
     end
     table.sort(zc.questList, function(a, b) return (a.name or "") < (b.name or "") end)
+    if zMatched == 0 and #universe > 0 and perf.unmatchedN < 8 then
+        -- none of this zone's items named it: the server spells it differently
+        perf.unmatchedN = perf.unmatchedN + 1
+        perf.unmatched[perf.unmatchedN] = zoneEntry.name or tostring(zoneEntry.zone)
+    end
     zoneCache[zoneEntry.zone] = zc
     return zc
 end
@@ -1141,6 +1190,7 @@ end
 function Engine.HaveCount(itemId)
     local n = 0
     if _G.GetItemCount then
+        perf.ownedCalls = perf.ownedCalls + 1
         local ok, c = pcall(_G.GetItemCount, itemId, true)   -- bags + bank
         if ok and type(c) == "number" then n = n + c end
     end
@@ -1601,9 +1651,10 @@ function Engine.PerfStats()
         for _ in pairs(t or {}) do n = n + 1 end
         return n
     end
-    return {
+    local st = {
         lua_kb = math.floor(collectgarbage("count")),
         srcCache = count(srcCache),
+        srcRows = srcCacheRows,
         srcCap = srcCacheCap,
         runsKeys = count(runsCache),
         pickKeys = count(pickCache),
@@ -1612,7 +1663,125 @@ function Engine.PerfStats()
         zones = count(zoneCache),
         jobs = #Engine.scanJobs,
         warm = cachesWarm,
+        budget = BUDGET_MS,
+        universe = Engine.universeCache and #Engine.universeCache or 0,
+        flags = count(itemFlags),
     }
+    for k, v in pairs(perf) do
+        if type(v) ~= "table" then st[k] = v end
+    end
+    local names = {}
+    for name in pairs(perf.unk) do names[#names + 1] = name end
+    table.sort(names)
+    st.unknownZones = (#names > 0) and table.concat(names, ", ") or "none"
+    st.unmatchedZones = (perf.unmatchedN > 0) and table.concat(perf.unmatched, ", ") or "none"
+    return st
+end
+
+-- /an srcstats: the real loot DB's shape, which every cache cap in the
+-- engine depends on and which the headless harness can only guess at. Runs
+-- as a pump job: one count call per universe item (no row tables), a
+-- rows-per-item histogram, the heaviest items, and for items with 1000+
+-- rows how many open-world zones list them (rows x listings is the term
+-- behind the v3.6.2 crash). Prints when done.
+local SRC_BUCKETS = { 0, 1, 2, 5, 10, 50, 100, 500, 1000, 5000 }
+function Engine.SourceStats(onDone)
+    if not (ANx.LootDbLoaded() and _G.ItemLocGetSourceCount) then
+        ANx.Print("srcstats: loot DB not loaded")
+        return
+    end
+    local items, ready = Engine.Universe()
+    if not ready then
+        ANx.Print("srcstats: waiting for the login scan to finish; try again in a moment")
+        return
+    end
+    Engine.Enqueue(function()
+        local getCount, getAt = _G.ItemLocGetSourceCount, _G.ItemLocGetSourceAt
+        local counts, heavy, total, n = {}, {}, 0, 0
+        local heavyRows = {}
+        for _, id in ipairs(items) do
+            Engine.MaybeYield()
+            local ok, c = pcall(getCount, id)
+            c = (ok and c) or 0
+            n = n + 1
+            total = total + c
+            local b = #SRC_BUCKETS
+            for i = 1, #SRC_BUCKETS do
+                if c <= SRC_BUCKETS[i] then b = i break end
+            end
+            counts[b] = (counts[b] or 0) + 1
+            if c >= 1000 then heavy[#heavy + 1] = id; heavyRows[id] = c end
+        end
+        table.sort(heavy, function(a, b) return heavyRows[a] > heavyRows[b] end)
+        -- how many zones list each heavy item (the scan walks it once per zone)
+        local listings, heavySet = {}, {}
+        for _, id in ipairs(heavy) do heavySet[id] = true end
+        local zonesListed = 0
+        if #heavy > 0 then
+            for _, z in ipairs(ANx.Zones or {}) do
+                Engine.YieldNow()
+                for _, id in ipairs(ANx.ItemsInZone(z.zone)) do
+                    if heavySet[id] then listings[id] = (listings[id] or 0) + 1 end
+                end
+                zonesListed = zonesListed + 1
+            end
+        end
+        -- source-type mix and unknown zone names on a bounded sample of the
+        -- heaviest items (their rows dominate the scan)
+        local typeN, sampled, unknownN = {}, 0, 0
+        local known = Engine.KnownZoneNameSet()
+        for i = 1, math.min(#heavy, 20) do
+            Engine.YieldNow()
+            local id = heavy[i]
+            for r = 1, heavyRows[id] do
+                local st, _, _, _, _, _, zn = getAt(id, r)
+                if st ~= nil then
+                    typeN[st] = (typeN[st] or 0) + 1
+                    if zn and zn ~= "" and not known[zn:lower()] then unknownN = unknownN + 1 end
+                end
+            end
+            sampled = sampled + 1
+        end
+        local lines = {}
+        lines[#lines + 1] = string.format("srcstats: %d items, %d source rows, %.1f rows/item avg", n, total, n > 0 and total / n or 0)
+        local parts, lo = {}, 0
+        for i = 1, #SRC_BUCKETS do
+            local c = counts[i] or 0
+            if c > 0 then
+                parts[#parts + 1] = string.format("%s%d:%d", (SRC_BUCKETS[i] <= lo + 1) and "" or ((lo + 1) .. "-"), SRC_BUCKETS[i], c)
+            end
+            lo = SRC_BUCKETS[i]
+        end
+        if (counts[#SRC_BUCKETS] or 0) > 0 then parts[#parts] = string.format(">%d:%d", SRC_BUCKETS[#SRC_BUCKETS - 1], counts[#SRC_BUCKETS]) end
+        lines[#lines + 1] = "rows-per-item buckets (rows:items): " .. table.concat(parts, "  ")
+        local rowsXlist = 0
+        for _, id in ipairs(heavy) do rowsXlist = rowsXlist + heavyRows[id] * (listings[id] or 0) end
+        lines[#lines + 1] = string.format("heavy items (1000+ rows): %d, %d rows, listed in %d zones scanned, rows x listings %d",
+            #heavy, (function() local s = 0 for _, id in ipairs(heavy) do s = s + heavyRows[id] end return s end)(), zonesListed, rowsXlist)
+        for i = 1, math.min(#heavy, 10) do
+            local id = heavy[i]
+            lines[#lines + 1] = string.format("  %s (%d): %d rows, in %d zones", ANx.GetItemDisplay(id, true), id, heavyRows[id], listings[id] or 0)
+        end
+        if sampled > 0 then
+            local tp = {}
+            for st, c in pairs(typeN) do tp[#tp + 1] = string.format("type%d:%d", st, c) end
+            table.sort(tp)
+            lines[#lines + 1] = string.format("source types over the %d heaviest: %s; rows naming an unknown zone: %d", sampled, table.concat(tp, " "), unknownN)
+        end
+        ANx.srcStatsLines = lines
+        for _, l in ipairs(lines) do ANx.Print(l) end
+        if onDone then pcall(onDone) end
+    end, nil, "srcstats")
+    ANx.Print("srcstats: walking the loot DB in the background...")
+end
+
+-- /an perf reset: zero the counters (after a /an reset rescan, say)
+function Engine.PerfReset()
+    for k, v in pairs(perf) do
+        if type(v) == "number" then perf[k] = 0
+        elseif type(v) == "string" then perf[k] = "-"
+        elseif type(v) == "table" then perf[k] = {} end
+    end
 end
 
 function Engine.GetSummary(exp, onDone)
