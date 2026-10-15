@@ -43,7 +43,7 @@ end
 
 qaFrame:SetScript("OnEvent", function(self, event)
     if event == "PLAYER_LOGIN" then
-        ANx.After(5, function() ANx.RequestCompletedQuests(true) end)
+        ANx.After(5, function() ANx.RequestCompletedQuests(true) end, "quests-completed")
     elseif event == "QUEST_QUERY_COMPLETE" then
         if GetQuestsCompleted then
             local ok, t = pcall(GetQuestsCompleted, {})
@@ -56,7 +56,7 @@ qaFrame:SetScript("OnEvent", function(self, event)
         logDirty = true
     elseif event == "QUEST_FINISHED" then
         -- possible turn-in: refresh completed list shortly after
-        ANx.After(2, function() ANx.RequestCompletedQuests() end)
+        ANx.After(2, function() ANx.RequestCompletedQuests() end, "quests-completed")
     end
 end)
 

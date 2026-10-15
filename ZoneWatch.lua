@@ -330,5 +330,5 @@ function ANx.ZoneWatchUpdate(announce)
         local a = pendingAnnounce
         pendingAnnounce = false
         ANx.ZoneWatchNow(a)
-    end)
+    end, "zone-watch")
 end

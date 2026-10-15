@@ -226,7 +226,7 @@ function UI.RefreshMats()
             local c = UI.Current()
             if c and BAG_SENSITIVE[c.type] then UI.Render() end
         end
-    end)
+    end, "mats-refresh")
 end
 
 -- ---------------------------------------------------------------------
@@ -765,14 +765,14 @@ local function CreateMainFrame()
         local function fire()
             local remain = (UI._searchDeadline or 0) - GetTime()
             if remain > 0.02 then
-                ANx.After(remain, fire)
+                ANx.After(remain, fire, "search-debounce")
                 return
             end
             UI._searchWaiting = nil
             local cur = UI.Current()
             if cur and cur.type == "search" then UI.Render() end
         end
-        ANx.After(0.25, fire)
+        ANx.After(0.25, fire, "search-debounce")
     end
     searchBox:SetScript("OnTextChanged", function(self)
         local txt = self:GetText() or ""

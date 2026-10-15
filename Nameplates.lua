@@ -265,7 +265,7 @@ end
 local function QueueRebuild(delay)
     if rebuildQueued then return end
     rebuildQueued = true
-    ANx.After(delay or REBUILD_WAIT, function() NP.RebuildZoneIndex(true) end)
+    ANx.After(delay or REBUILD_WAIT, function() NP.RebuildZoneIndex(true) end, "plates-rebuild")
 end
 
 local function PumpZoneIndex()
@@ -614,7 +614,7 @@ function NP.OnAttune()
         indexGen = indexGen + 1
         RefreshAllPlates()
         QueueRebuild(ATTUNE_WAIT)
-    end)
+    end, "plates-attune")
 end
 
 -- normalise plate/source names the same way on both sides: trailing spaces
@@ -676,7 +676,7 @@ function NP.Init()
     -- the index needs the server data, which is NOT ready at login: rebuild
     -- once it arrives (Core calls NP.OnDataReady), and also shortly after
     -- init to cover /reload with the data already live
-    ANx.After(3, function() NP.RebuildZoneIndex(true) end)
+    ANx.After(3, function() NP.RebuildZoneIndex(true) end, "plates-rebuild")
 
     local ev = CreateFrame("Frame")
     ev:RegisterEvent("PLAYER_TARGET_CHANGED")

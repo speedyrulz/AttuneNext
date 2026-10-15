@@ -68,6 +68,8 @@ perf.unmatched, perf.unmatchedN = {}, 0              -- bounded sample of OUR zo
 perf.ownedCalls = 0                                  -- GetItemCount from IsOwned
 perf.pumpFrames, perf.pumpOver, perf.pumpMs, perf.pumpMaxMs, perf.pumpMaxTag = 0, 0, 0, 0, "-"
 perf.resumeMaxMs, perf.resumeMaxTag = 0, "-"
+perf.resumeMaxSite, perf.resumeMaxKbIn, perf.resumeMaxKbOut = "-", 0, 0  -- yield site that ended it, Lua KB before/after
+perf.peakKb, perf.peakTag = 0, "-"                   -- highest Lua heap seen by the pump, and the job running
 perf.gcMs, perf.gcMaxMs = 0, 0
 perf.exportMs, perf.summariesS, perf.idleS = 0, 0, 0
 
@@ -258,20 +260,27 @@ local function Clock()
 end
 
 local yieldCheck = 0
-function Engine.MaybeYield()
+local yieldSite = "-"   -- tag of the call site that last yielded (for /an perf:
+                        -- the work of a resume lies between two yield sites, and
+                        -- the 3.3.5 client has no debug.getinfo to name it after)
+function Engine.MaybeYield(site)
     yieldCheck = yieldCheck + 1
     if yieldCheck >= 25 then
         yieldCheck = 0
-        if coroutine.running() then coroutine.yield() end
+        if coroutine.running() then
+            yieldSite = site or "?"
+            coroutine.yield()
+        end
     end
 end
 
 -- Unconditional yield (safe on the main thread). Use this around chunks of
 -- work that are individually expensive - MaybeYield only stops every 25th
 -- call, which is far too coarse for "one whole instance" sized steps.
-function Engine.YieldNow()
+function Engine.YieldNow(site)
     if coroutine.running() then
         yieldCheck = 0
+        yieldSite = site or "?"
         coroutine.yield()
     end
 end
@@ -288,9 +297,18 @@ pumpFrame:SetScript("OnUpdate", function(self)
     local now = start
     while now - start < BUDGET_MS do
         if coroutine.status(job.co) == "dead" then break end
+        local kbIn = collectgarbage("count")
         local ok, err = coroutine.resume(job.co)
         local t = Clock()   -- (the loop condition read the clock here anyway)
-        if t - now > perf.resumeMaxMs then perf.resumeMaxMs = t - now; perf.resumeMaxTag = tostring(job.tag) end
+        if t - now > perf.resumeMaxMs then
+            perf.resumeMaxMs = t - now
+            perf.resumeMaxTag = tostring(job.tag)
+            -- which yield ended it, and whether the heap shrank inside it (a
+            -- big drop = an automatic collector cycle ran during the resume)
+            perf.resumeMaxSite = (coroutine.status(job.co) == "dead") and "end" or yieldSite
+            perf.resumeMaxKbIn = math.floor(kbIn)
+            perf.resumeMaxKbOut = math.floor(collectgarbage("count"))
+        end
         now = t
         if not ok then
             ANx.Print("|cffff4040scan error:|r " .. tostring(err))
@@ -301,6 +319,8 @@ pumpFrame:SetScript("OnUpdate", function(self)
     -- its default pacing, Lua's collector let that garbage pile up to several
     -- times the live data during login; a small step per scan frame keeps it
     -- bounded (cheap: only runs while a background job is active).
+    local kb = collectgarbage("count")
+    if kb > perf.peakKb then perf.peakKb = math.floor(kb); perf.peakTag = tostring(job.tag) end
     collectgarbage("step", GC_STEP_KB)
     local gcEnd = Clock()
     local gcMs, frameMs = gcEnd - now, gcEnd - start
@@ -397,7 +417,7 @@ function Engine.WarmPredicates()
     local doQChar = need.qchar and not warmed.qchar
     local first = not cachesWarm
     for _, id in ipairs(items) do
-        Engine.MaybeYield()
+        Engine.MaybeYield("warmup")
         -- (no Engine.Sources pre-fill here: the universe is far larger than
         -- the bounded source cache, so pre-loading every item just built and
         -- threw away every source record a second time; the predicates
@@ -840,7 +860,7 @@ function Engine.ZoneData(zoneEntry, inCoroutine)
     local zLower = (zoneEntry.name or ""):lower()
     local zMatched = 0
     for _, itemId in ipairs(universe) do
-        if inCoroutine then Engine.MaybeYield() end
+        if inCoroutine then Engine.MaybeYield("zone-items") end
         local sources = Engine.Sources(itemId)
         -- The loot DB already scoped this item to THIS zone by its numeric id,
         -- so it belongs here. We name-match source rows only to attribute the
@@ -1084,7 +1104,7 @@ function Engine.RemainingReport(yielding)
     }
     for _, prof in ipairs(ANx.ProfessionOrder or {}) do
         for exp = 1, 3 do
-            if yielding then Engine.MaybeYield() end
+            if yielding then Engine.MaybeYield("whatsleft") end
             for _, e in ipairs(Engine.ProfessionEntries(prof, exp)) do
                 r.craftProf[e.id] = prof
             end
@@ -1094,7 +1114,7 @@ function Engine.RemainingReport(yielding)
     r.ready = ready
     local seenCur = {}
     for _, id in ipairs(universe) do
-        if yielding then Engine.MaybeYield() end
+        if yielding then Engine.MaybeYield("whatsleft") end
         local costs
         for _, scope in ipairs({ "char", "acct" }) do
             if Engine.ScopeLeft(id, scope) then
@@ -1606,7 +1626,7 @@ local function BuildSummary(exp)
         local labelSets = (kind == "D") and sum.Dl or sum.Rl
         for _, inst in ipairs(Engine.InstancesFor(exp, kind)) do
             for _, d in ipairs(Engine.InstanceDiffs(inst)) do
-                Engine.MaybeYield()
+                Engine.MaybeYield("inst")
                 AddSet(sum[kind], d.items)
                 labelSets[d.label] = labelSets[d.label] or {}
                 AddSet(labelSets[d.label], d.items)
@@ -1621,14 +1641,14 @@ local function BuildSummary(exp)
             AddSet(sum.W, zc.world)
         end
         AddSet(sum.V, zc.vendor)
-        Engine.MaybeYield()
+        Engine.MaybeYield("zone")
     end
     -- professions
     for _, prof in ipairs(ANx.ProfessionOrder or {}) do
         for _, e in ipairs(Engine.ProfessionEntries(prof, exp)) do
             sum.C[e.id] = true
         end
-        Engine.MaybeYield()
+        Engine.MaybeYield("prof")
     end
     sum.ready = true
     cacheDirty = true
@@ -1700,7 +1720,7 @@ function Engine.SourceStats(onDone)
         local counts, heavy, total, n = {}, {}, 0, 0
         local heavyRows = {}
         for _, id in ipairs(items) do
-            Engine.MaybeYield()
+            Engine.MaybeYield("srcstats")
             local ok, c = pcall(getCount, id)
             c = (ok and c) or 0
             n = n + 1
@@ -1719,7 +1739,7 @@ function Engine.SourceStats(onDone)
         local zonesListed = 0
         if #heavy > 0 then
             for _, z in ipairs(ANx.Zones or {}) do
-                Engine.YieldNow()
+                Engine.YieldNow("srcstats")
                 for _, id in ipairs(ANx.ItemsInZone(z.zone)) do
                     if heavySet[id] then listings[id] = (listings[id] or 0) + 1 end
                 end
@@ -1731,7 +1751,7 @@ function Engine.SourceStats(onDone)
         local typeN, sampled, unknownN = {}, 0, 0
         local known = Engine.KnownZoneNameSet()
         for i = 1, math.min(#heavy, 20) do
-            Engine.YieldNow()
+            Engine.YieldNow("srcstats")
             local id = heavy[i]
             for r = 1, heavyRows[id] do
                 local st, _, _, _, _, _, zn = getAt(id, r)
@@ -2009,7 +2029,7 @@ function Engine.AttuneNextPick(view, opts)
     local pool = {}
     local seen = {}
     for _, id in ipairs(items) do
-        if yielding then Engine.MaybeYield() end
+        if yielding then Engine.MaybeYield("pick") end
         if not seen[id] and not ignore[id] and Engine.Eligible(id)
             and not ANx.CountDone(id) and Engine.HasAnySource(id)
             and Engine.ItemLevelOk(id, levelOn, charLvl) then
@@ -2245,13 +2265,13 @@ function Engine.RankInstanceRuns(view, yielding, which)
                 end
                 if inst then
                 for _, d in ipairs(Engine.InstanceDiffs(inst)) do
-                    if yielding then Engine.YieldNow() end
+                    if yielding then Engine.YieldNow("rank") end
                     if ANx.DifficultyMatches(d.label, inst.map) then
                         local instKey = inst.map .. ":" .. d.diff
                         if not ignoreInst[instKey] then
                             local expected, count = 0, 0
                             for _, id in ipairs(d.items) do
-                                if yielding then Engine.MaybeYield() end
+                                if yielding then Engine.MaybeYield("rank") end
                                 if Engine.Eligible(id) and not ANx.CountDone(id) then
                                     count = count + 1
                                     expected = expected
@@ -2312,14 +2332,14 @@ function Engine.RankZoneRuns(view, yielding, which)
     end
     local runs = {}
     for _, z in ipairs(ANx.Zones or {}) do
-        if yielding then Engine.YieldNow() end
+        if yielding then Engine.YieldNow("rank") end
         local key = "z:" .. z.zone
         if not ignoreInst[key]
             and (not scopeExp or z.exp == scopeExp)
             and (not levelOn or Engine.ZoneMinLevel(z) <= charLvl) then
             local expected, count, items = 0, 0, {}
             for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
-                if yielding then Engine.MaybeYield() end
+                if yielding then Engine.MaybeYield("rank") end
                 if Engine.Eligible(id) and not ANx.CountDone(id)
                     and Engine.ItemLevelOk(id, levelOn, charLvl) then
                     local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())

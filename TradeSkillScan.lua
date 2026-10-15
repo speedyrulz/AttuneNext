@@ -86,5 +86,5 @@ function ANx.QueueTradeSkillScan()
     ANx.After(0.5, function()
         queued = false
         ANx.ScanTradeSkill()
-    end)
+    end, "tradeskill-scan")
 end

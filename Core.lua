@@ -268,6 +268,7 @@ local perf = {
     afterN = 0, afterMs = 0, afterMaxMs = 0, afterMaxName = "-",
     statusExportMs = 0, statusExportN = 0,
     readyAt = 0, readyN = 0,                                 -- GetTime() of the last data-ready
+    zfN = 0, zfMs = 0, zfMaxMs = 0, zfMaxZone = 0,           -- ItemLocGetAllItemsInZone calls
 }
 ANx.Perf = perf
 local function PerfClock()
@@ -1573,7 +1574,15 @@ end
 -- All attunable + obtainable itemIds for a zoneId (open world) or map zone id
 function ANx.ItemsInZone(zoneId)
     if not ANx.LootDbLoaded() then return {} end
-    return _G.ItemLocGetAllItemsInZone(zoneId, 0, 0, 1, 1) or {}
+    -- timed: one server call per zone / instance difficulty, untimed until
+    -- v3.7.0 and a suspect for the multi-second scan resumes seen in game
+    local t0 = PerfClock()
+    local r = _G.ItemLocGetAllItemsInZone(zoneId, 0, 0, 1, 1) or {}
+    local ms = PerfClock() - t0
+    perf.zfN = perf.zfN + 1
+    perf.zfMs = perf.zfMs + ms
+    if ms > perf.zfMaxMs then perf.zfMaxMs = ms; perf.zfMaxZone = zoneId end
+    return r
 end
 
 -- All sources of an item: { {srcType, objType, objId, chance, perMille, objName, zoneName, spawned}, ... }
@@ -1832,7 +1841,7 @@ function ANx.MarkAttuneDirty()
         dirtyPending = false
         if ANx.Engine then ANx.Engine.InvalidateStats() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
-    end)
+    end, "attune-dirty")
 end
 
 -- Debounced light refresh for mere attune-progress ticks (no cache wipe:
@@ -1844,7 +1853,7 @@ function ANx.MarkProgressDirty()
     ANx.After(2, function()
         progPending = false
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
-    end)
+    end, "progress-tick")
 end
 
 -- Debounced stats invalidation for money/currency changes (affordable filter)
@@ -1858,7 +1867,7 @@ function ANx.MarkMoneyDirty()
             if ANx.Engine then ANx.Engine.InvalidateStats() end
             if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
         end
-    end)
+    end, "money-dirty")
 end
 
 -- Debounced speed-aura scan (UNIT_AURA storms in combat)
@@ -1869,7 +1878,7 @@ function ANx.QueueSpeedAuraScan()
     ANx.After(2, function()
         speedScanPending = false
         if ANx.ScanSpeedAuras then ANx.ScanSpeedAuras() end
-    end)
+    end, "speed-aura")
 end
 
 -- ---------------------------------------------------------------------
@@ -2052,6 +2061,8 @@ SlashCmdList["ATTUNENEXT"] = function(msg)
                 st.tipBind, st.tipClass, st.tipFac, st.tipEmpty, st.cacheReq, st.ownedCalls))
             ANx.Print(string.format("timers: %d callbacks, %.0fms, slowest %.1fms (%s); exports: struct %.0fms, status %.0fms x%d",
                 st.afterN, st.afterMs, st.afterMaxMs, st.afterMaxName, st.exportMs, st.statusExportMs, st.statusExportN))
+            ANx.Print(string.format("zone fetches: %d calls, %.0fms, max %.1fms (zone %s); longest resume ended at '%s', Lua %d KB -> %d KB; peak Lua %d KB during %s",
+                st.zfN, st.zfMs, st.zfMaxMs, tostring(st.zfMaxZone), st.resumeMaxSite, st.resumeMaxKbIn, st.resumeMaxKbOut, st.peakKb, st.peakTag))
             collectgarbage("collect")
             ANx.Print(string.format("after GC: |cffffff00%d KB|r", math.floor(collectgarbage("count"))))
         end

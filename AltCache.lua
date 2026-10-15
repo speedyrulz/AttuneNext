@@ -29,7 +29,7 @@ function ANx.SnapshotAltCan()
     if not (ANx.db and ANx.Engine) then return end
     local universe, ready = ANx.Engine.Universe()
     if not ready or #universe == 0 then
-        ANx.After(5, ANx.SnapshotAltCan)   -- item database still building
+        ANx.After(5, ANx.SnapshotAltCan, "alt-snapshot")   -- item database still building
         return
     end
     snapshotting = true
@@ -80,7 +80,7 @@ function ANx.SnapshotAltCan()
             n = n + 1
         end
         if i <= #universe then
-            ANx.After(0.1, step)
+            ANx.After(0.1, step, "alt-snapshot-step")
         else
             rec.items = "," .. table.concat(ids, ",") .. ","
             ANx.db.altCan[CharName()] = rec

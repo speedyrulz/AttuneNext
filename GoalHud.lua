@@ -163,5 +163,5 @@ function ANx.GoalHudUpdate()
     ANx.After(1, function()
         pending = false
         ANx.GoalHudNow()
-    end)
+    end, "goal-hud")
 end
