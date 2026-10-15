@@ -181,6 +181,18 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 
 ## Changelog
 
+**v3.7.0**
+
+*The login scan is rebuilt around reading the server's loot database without copying it. On the Oct 14 in-game reading the old scan read 42 million source rows (for 2.2 million real ones), built a Lua table for each, ran for three minutes at 36 ms a frame with one 3.8-second freeze, and re-read 40,000 item tooltips. Each of those has a fix below. Your saved scan is rebuilt once on first login (the version changed).*
+
+- **Source rows are streamed, never copied.** Every scan, count and filter now reads rows straight off the server API and stops at the first row that decides it. Each item is classified **once per scan** into a compact memo that every zone reads, instead of once per zone that lists it. In the headless harness the heavy-tail scan went from 602 frames and 33.7 s to 81 frames and under 1 s, peak memory from 109 MB to 37 MB, with results verified identical to the previous version (summaries, every zone's data, 19,224 best-source lookups, all filter predicates).
+- **The background pump keeps to its frame budget.** Scan slices yield after 2 ms of work instead of every 25th item, the garbage collector gets small bounded steps inside the same 10 ms budget instead of one unbounded step after it, and the budget drops to 4 ms in combat. The scan-end status export runs as a background job instead of one 60-200 ms frame.
+- **Tooltip results are remembered across sessions.** Bind type, faction lock and class lock are read from item tooltips; with a Bind or Faction filter saved, every login used to re-read 18-22 thousand of them. They are now saved at scan end and logout and restored at load. *Rescan loot DB* clears them.
+- **"In bags: Hide" no longer asks the client about every item on every render.** One owned-items set is built per bag, bank or equipment change by walking your containers.
+- **The zone-entry note no longer freezes the frame at login.** While caches are cold its item walk runs in the background and the note and instance HUD appear when it finishes (803 ms on the main thread in the Oct 14 reading).
+- **Cached logins warm their caches too.** A login that restores the saved structure runs no scan, so the first screen used to compute every filter predicate cold.
+- **More telemetry in `/an perf`:** zone-fetch timing, which yield site ended the longest resume and how the heap moved inside it, peak Lua memory, streamed row counts, and every deferred timer now has a name.
+
 **v3.6.3**
 
 - Measurement-only release, no behaviour changes. `/an perf` now reports what the login scan actually did on your client: source rows read per item and the heaviest item, how often the source cache flushed, how many items were classified by zone name versus the localized fallback (with samples of unknown zone names), pump time per frame with the worst frame and its job, garbage-collector time, the slowest deferred callback, tooltip scans and cache requests, and the cost of the two exports. `/an perf reset` zeroes the counters.

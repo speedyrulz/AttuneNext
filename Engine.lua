@@ -385,15 +385,10 @@ pumpFrame:SetScript("OnUpdate", function(self)
             -- levels). Counts render inline, and computing them against COLD
             -- caches is what froze the first open of every screen for
             -- seconds - warm, they are a cheap sweep of native calls.
-            if not cachesWarm or Engine.WarmupIncomplete() then
-                Engine.Enqueue(Engine.WarmPredicates, function()
-                    if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
-                end, "warmup")
-            end
-            -- keep the button's global pick warm so pressing it is instant
-            if Engine.PickCached(nil, "btn") == nil then
-                Engine.PickAsync(nil, "btn")
-            end
+            -- (only once the server data is live: a job that drains the queue
+            -- before then - the zone watch at login - would warm predicates
+            -- against the status cache, to be thrown away at data-ready)
+            if ANx.dataReady then Engine.EnsureWarm() end
         end
         if job.onDone then
             local ok, err = pcall(job.onDone)
@@ -493,6 +488,21 @@ function Engine.WarmIfNeeded()
     Engine.Enqueue(Engine.WarmPredicates, function()
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end, "warmup")
+end
+
+-- Queue the predicate warmup and the AttuneNext button's pick unless they
+-- are already done or queued. The pump does this itself when a scan ends;
+-- a cached login runs no scan.
+function Engine.EnsureWarm()
+    if not ANx.dataReady then return end
+    if not cachesWarm or Engine.WarmupIncomplete() then
+        Engine.Enqueue(Engine.WarmPredicates, function()
+            if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+        end, "warmup")
+    end
+    if Engine.PickCached and Engine.PickCached(nil, "btn") == nil then
+        Engine.PickAsync(nil, "btn")
+    end
 end
 
 function Engine.Enqueue(fn, onDone, tag)

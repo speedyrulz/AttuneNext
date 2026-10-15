@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "3.6.3"
+ANx.VERSION = "3.7.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -1775,6 +1775,11 @@ function AttuneNext_OnDataReady()
         end
         -- refresh in the background; toast when everything is live
         for exp = 1, 3 do ANx.Engine.GetSummary(exp) end
+        -- a restored structure enqueues no scan, so the pump never ran and
+        -- the first screen computed every filter predicate cold: warm them
+        -- (and the button's pick) as jobs here too (tag-deduped, no-ops when
+        -- the scan is already queued)
+        if ANx.Engine.EnsureWarm then ANx.Engine.EnsureWarm() end
         if ANx.Plates and ANx.Plates.OnDataReady then ANx.Plates.OnDataReady() end
         ANx.After(2, WatchRefreshDone, "WatchRefreshDone")
     end
