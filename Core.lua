@@ -646,7 +646,9 @@ function ANx.ExportStatusCache()
     if not ready or #universe == 0 then return end
     local t0 = PerfClock()
     local tags, can, acct, prog, forge = {}, {}, {}, {}, {}
+    local MaybeYield = ANx.Engine.MaybeYield   -- no-op on the main thread (logout)
     for _, id in ipairs(universe) do
+        MaybeYield("status-export")
         if ANx.IsAttunableAtAll(id) then tags[#tags + 1] = id end
         if ANx.CanCharAttune(id) then can[#can + 1] = id end
         if ANx.AccountHasVariant(id) then acct[#acct + 1] = id end
@@ -1670,7 +1672,10 @@ local function WatchRefreshDone()
         refreshToasted = true
         if ANx.Engine.InvalidateStats then ANx.Engine.InvalidateStats() end
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
-        pcall(ANx.ExportStatusCache)     -- keep next login's snapshot fresh
+        -- keep next login's snapshot fresh: four client calls per universe
+        -- item, 60-200 ms in one frame when run inline, so it runs as a
+        -- yielding pump job (the logout export stays synchronous)
+        ANx.Engine.Enqueue(ANx.ExportStatusCache, nil, "status-export")
         ANx.Toast("AttuneNext data has been refreshed.")
         return
     end

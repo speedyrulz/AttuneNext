@@ -255,38 +255,66 @@ end
 Engine.scanJobs = {}
 Engine.scanning = false
 local pumpFrame = CreateFrame("Frame")
+-- Pump time per frame, scan slices AND collector steps together. A 60 fps
+-- client has 16.7 ms per frame, so this is a ceiling, not a target. The
+-- v3.6.x pump scanned for 10 ms and THEN ran one unbounded
+-- collectgarbage("step", 2048): 4-5 ms more per frame on average and up to
+-- 45 ms in one frame (a Lua 5.1 step does the collector's whole catch-up for
+-- everything allocated since its threshold). In game it was worse still:
+-- the "every 25th call" yield rule let one resume run 3.8 s inside a
+-- 1-2 GB heap.
 local BUDGET_MS = 10
-local GC_STEP_KB = 2048   -- collector work per scan frame (see the pump)
+local COMBAT_BUDGET_MS = 4   -- while InCombatLockdown(): frame time matters more than scan time
+local GC_SHARE = 0.3         -- part of the budget reserved for the collector (3 of 10 ms)
+local GC_STEP_KB = 256       -- one collector step; several per frame (see CollectSome)
+local GC_STEPS_MAX = 8       -- idle collector: pull its threshold in by at most 2 MB/frame
+local SLICE_MS = 2           -- MaybeYield hands control back after this much work
 
 local function Clock()
     if debugprofilestop then return debugprofilestop() end
     return GetTime() * 1000
 end
 
-local yieldCheck = 0
+-- Yield once the running slice has used SLICE_MS. The old "every 25th
+-- call" rule let one slice run 35-50 ms in the harness (25 world-drop
+-- items, each with hundreds of source rows) and seconds in game; a clock
+-- check per call costs well under a microsecond. No-op off the pump.
+local sliceStart = 0    -- Clock() when the pump last resumed the front job
 local yieldSite = "-"   -- tag of the call site that last yielded (for /an perf:
                         -- the work of a resume lies between two yield sites, and
                         -- the 3.3.5 client has no debug.getinfo to name it after)
 function Engine.MaybeYield(site)
-    yieldCheck = yieldCheck + 1
-    if yieldCheck >= 25 then
-        yieldCheck = 0
-        if coroutine.running() then
-            yieldSite = site or "?"
-            coroutine.yield()
-        end
+    if coroutine.running() and Clock() - sliceStart >= SLICE_MS then
+        yieldSite = site or "?"
+        coroutine.yield()
     end
 end
 
 -- Unconditional yield (safe on the main thread). Use this around chunks of
--- work that are individually expensive - MaybeYield only stops every 25th
--- call, which is far too coarse for "one whole instance" sized steps.
+-- work that are individually expensive and have no MaybeYield inside.
 function Engine.YieldNow(site)
     if coroutine.running() then
-        yieldCheck = 0
         yieldSite = site or "?"
         coroutine.yield()
     end
+end
+
+-- A few small collector steps after the scan slices. Lua 5.1's step does
+-- the collector's catch-up work for the bytes allocated since its threshold
+-- plus the KB given, so it is already proportional to what the scan just
+-- allocated; stop at the frame budget, or as soon as a collection cycle
+-- completes. An idle collector makes a step nearly free (it only pulls the
+-- next cycle closer), so the count is capped too: at most 2 MB per frame,
+-- the pacing the old single 2048 KB step gave.
+local function CollectSome(start, budget)
+    for _ = 1, GC_STEPS_MAX do
+        if collectgarbage("step", GC_STEP_KB) or Clock() - start >= budget then break end
+    end
+end
+
+local function PumpBudget()
+    if InCombatLockdown and InCombatLockdown() then return COMBAT_BUDGET_MS end
+    return BUDGET_MS
 end
 
 pumpFrame:SetScript("OnUpdate", function(self)
@@ -297,10 +325,13 @@ pumpFrame:SetScript("OnUpdate", function(self)
         return
     end
     Engine.scanning = true
+    local budget = PumpBudget()
     local start = Clock()
+    local scanUntil = budget * (1 - GC_SHARE)
     local now = start
-    while now - start < BUDGET_MS do
+    while now - start < scanUntil do
         if coroutine.status(job.co) == "dead" then break end
+        sliceStart = now
         local kbIn = collectgarbage("count")
         local ok, err = coroutine.resume(job.co)
         local t = Clock()   -- (the loop condition read the clock here anyway)
@@ -319,13 +350,12 @@ pumpFrame:SetScript("OnUpdate", function(self)
             break
         end
     end
-    -- A scan churns through millions of short-lived source records. Left to
-    -- its default pacing, Lua's collector let that garbage pile up to several
-    -- times the live data during login; a small step per scan frame keeps it
-    -- bounded (cheap: only runs while a background job is active).
+    -- Left to its default pacing, Lua's collector let the scan's garbage
+    -- pile up to several times the live data during login; stepping it every
+    -- scan frame keeps it bounded (only runs while a background job is active).
     local kb = collectgarbage("count")
     if kb > perf.peakKb then perf.peakKb = math.floor(kb); perf.peakTag = tostring(job.tag) end
-    collectgarbage("step", GC_STEP_KB)
+    CollectSome(start, budget)
     local gcEnd = Clock()
     local gcMs, frameMs = gcEnd - now, gcEnd - start
     perf.pumpFrames = perf.pumpFrames + 1
@@ -333,7 +363,7 @@ pumpFrame:SetScript("OnUpdate", function(self)
     perf.gcMs = perf.gcMs + gcMs
     if gcMs > perf.gcMaxMs then perf.gcMaxMs = gcMs end
     if frameMs > perf.pumpMaxMs then perf.pumpMaxMs = frameMs; perf.pumpMaxTag = tostring(job.tag) end
-    if frameMs > BUDGET_MS * 2 then perf.pumpOver = perf.pumpOver + 1 end
+    if frameMs > budget * 2 then perf.pumpOver = perf.pumpOver + 1 end
     if coroutine.status(job.co) == "dead" then
         table.remove(Engine.scanJobs, 1)
         if #Engine.scanJobs == 0 then
@@ -896,7 +926,7 @@ local zoneOrd            -- [zoneLower] -> index in ANx.Zones (built once)
 local ordOf = {}         -- scratch: ordinal -> type bits for the item being walked
 local ordList = {}       -- scratch: ordinals touched, in first-seen order
 local bytes = {}         -- scratch: the memo string's bytes
-local ROW_YIELD = 512    -- rows walked between yields inside a job
+local ROW_YIELD = 128    -- rows walked between slice checks inside a job
 local strchar, unpack = string.char, unpack
 
 local function ZoneOrdinals()
@@ -923,7 +953,7 @@ local function BuildItemMemo(itemId, inCoroutine)
     perf.memoItems = perf.memoItems + 1
     local rec, union, k, qv = false, 0, 0, nil
     for i = 1, n do
-        if inCoroutine and i % ROW_YIELD == 0 then Engine.YieldNow("memo-rows") end
+        if inCoroutine and i % ROW_YIELD == 0 then Engine.MaybeYield("memo-rows") end
         local srcType, _, objId, _, _, objName, zn = getAt(itemId, i)
         if srcType ~= nil then
             local zl = ZoneLower(zn)
@@ -1175,6 +1205,9 @@ function Engine.ProfessionEntries(prof, exp)
         -- parallel arrays: same index across ids/spells/skills/exps
         local ids, spells, skills, exps = rows.ids, rows.spells, rows.skills, rows.exps
         for i = 1, #ids do
+            -- a whole profession ran as one 15-25 ms slice inside BuildSummary
+            -- (IsCraftObtained reads every recipe's rows); no-op off the pump
+            Engine.MaybeYield("prof-items")
             local itemId = ids[i]
             if exps[i] == exp and ANx.IsAttunableAtAll(itemId)
                 and Engine.IsCraftObtained(itemId) then
