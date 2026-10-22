@@ -6,7 +6,7 @@
 -- =========================================================================
 local ADDON_NAME, ANx = ...
 _G.AttuneNext = ANx
-ANx.VERSION = "4.0.0"
+ANx.VERSION = "4.1.0"
 
 -- ---------------------------------------------------------------------
 -- Constants
@@ -163,6 +163,8 @@ local defaults = {
     raresOnly = false,    -- World Drops: only items that drop from rare spawns
     zoneExclusive = false,-- global: only count/show items found in a single zone
     hideInBags = false,   -- global: hide items you already carry (bags, bank, equipped)
+    statFilter = "",      -- global: picked stats as ",str,crit," (see Engine.STATS); "" = off
+    statMatch = "any",    -- "any": gear with at least one picked stat; "all": every picked stat
     forge = 1,            -- Forge Level (1 Attunable, 2 TF, 3 WF, 4 LF)
     classicSkin = false,  -- true = "unskinned" look (no painted art pack)
     browseWinPos = nil,   -- saved position of the simple browse window
@@ -238,7 +240,7 @@ end
 -- ONE shared implementation: the two "reset filters" buttons each carried
 -- their own (different, both incomplete) key lists.
 local FILTER_RESET_KEYS = {
-    "scope", "faction", "forge", "zoneExclusive", "hideInBags", "stockFilter", "vendorFilter",
+    "scope", "faction", "forge", "zoneExclusive", "hideInBags", "statFilter", "statMatch", "stockFilter", "vendorFilter",
     "raresOnly", "questClass", "classFilter", "bindFilter", "accessories",
     "difficulty", "raidSize", "affordableOnly",
 }

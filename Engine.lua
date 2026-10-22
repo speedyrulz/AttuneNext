@@ -249,6 +249,7 @@ end
 -- Full manual rescan (Refresh button / "/an reset")
 function Engine.ForceRescan()
     if ANx.db then ANx.db.structCache = nil; ANx.db.tipCache = nil end
+    Engine.InvalidateStatCache()
     if ANx.InvalidateBindCache then ANx.InvalidateBindCache() end
     if ANx.InvalidateClassLockCache then ANx.InvalidateClassLockCache() end
     if ANx.InvalidateAccessoryCache then ANx.InvalidateAccessoryCache() end
@@ -429,6 +430,8 @@ local function NeededPredicates()
         -- min level is only read by the current-level gate
         lvl = (ANx.LevelGate and (ANx.LevelGate("btn") or ANx.LevelGate("rec"))) or false,
         zex = db.zoneExclusive == true,
+        -- one GetItemStats per item, only while a stat is picked
+        stat = (db.statFilter or "") ~= "",
         -- "my quests" hiding applies under character scope
         qchar = (db.scope ~= "account") and ((db.questClass or "mine") ~= "all"),
     }
@@ -452,6 +455,7 @@ function Engine.WarmPredicates()
     local doLvl = need.lvl and not warmed.lvl
     local doZex = need.zex and not warmed.zex
     local doQChar = need.qchar and not warmed.qchar
+    local doStat = need.stat and not warmed.stat
     local first = not cachesWarm
     for _, id in ipairs(items) do
         Engine.MaybeYield("warmup")
@@ -474,6 +478,7 @@ function Engine.WarmPredicates()
         if doQSide then Engine.ItemQuestSide(id) end
         if doQChar then Engine.ItemQuestCharBlocked(id) end
         if doZex then Engine.IsZoneExclusive(id) end
+        if doStat then Engine.ItemStatMask(id) end
     end
     if doBind then warmed.bind = true end
     if doAcc then warmed.acc = true end
@@ -481,6 +486,7 @@ function Engine.WarmPredicates()
     if doLvl then warmed.lvl = true end
     if doZex then warmed.zex = true end
     if doQChar then warmed.qchar = true end
+    if doStat then warmed.stat = true end
     cachesWarm = true
     -- the per-item filter caches are built; the raw source arrays for the
     -- whole universe are no longer needed
@@ -964,6 +970,106 @@ function Engine.IsOwned(itemId)
     return OwnedSet()[itemId] == true
 end
 
+-- ---------------------------------------------------------------------
+-- Stat filter: only gear carrying the stats the player picked.
+-- ---------------------------------------------------------------------
+-- Each entry is one bit of an item's stat mask. `mods` lists every
+-- GetItemStats key that counts as that stat: WotLK merged melee/ranged/spell
+-- ratings, but older items still carry the split keys.
+Engine.STATS = {
+    { key = "str",   label = "Strength",          mods = { "ITEM_MOD_STRENGTH_SHORT" } },
+    { key = "agi",   label = "Agility",           mods = { "ITEM_MOD_AGILITY_SHORT" } },
+    { key = "sta",   label = "Stamina",           mods = { "ITEM_MOD_STAMINA_SHORT" } },
+    { key = "int",   label = "Intellect",         mods = { "ITEM_MOD_INTELLECT_SHORT" } },
+    { key = "spi",   label = "Spirit",            mods = { "ITEM_MOD_SPIRIT_SHORT" } },
+    { key = "ap",    label = "Attack Power",      mods = { "ITEM_MOD_ATTACK_POWER_SHORT", "ITEM_MOD_RANGED_ATTACK_POWER_SHORT",
+                                                           "ITEM_MOD_FERAL_ATTACK_POWER_SHORT" } },
+    { key = "sp",    label = "Spell Power",       mods = { "ITEM_MOD_SPELL_POWER_SHORT", "ITEM_MOD_SPELL_DAMAGE_DONE_SHORT",
+                                                           "ITEM_MOD_SPELL_HEALING_DONE_SHORT" } },
+    { key = "hit",   label = "Hit",               mods = { "ITEM_MOD_HIT_RATING_SHORT", "ITEM_MOD_HIT_MELEE_RATING_SHORT",
+                                                           "ITEM_MOD_HIT_RANGED_RATING_SHORT", "ITEM_MOD_HIT_SPELL_RATING_SHORT" } },
+    { key = "crit",  label = "Critical Strike",   mods = { "ITEM_MOD_CRIT_RATING_SHORT", "ITEM_MOD_CRIT_MELEE_RATING_SHORT",
+                                                           "ITEM_MOD_CRIT_RANGED_RATING_SHORT", "ITEM_MOD_CRIT_SPELL_RATING_SHORT" } },
+    { key = "haste", label = "Haste",             mods = { "ITEM_MOD_HASTE_RATING_SHORT", "ITEM_MOD_HASTE_MELEE_RATING_SHORT",
+                                                           "ITEM_MOD_HASTE_RANGED_RATING_SHORT", "ITEM_MOD_HASTE_SPELL_RATING_SHORT" } },
+    { key = "exp",   label = "Expertise",         mods = { "ITEM_MOD_EXPERTISE_RATING_SHORT" } },
+    { key = "arp",   label = "Armor Penetration", mods = { "ITEM_MOD_ARMOR_PENETRATION_RATING_SHORT" } },
+    { key = "spen",  label = "Spell Penetration", mods = { "ITEM_MOD_SPELL_PENETRATION_SHORT" } },
+    { key = "mp5",   label = "Mana per 5 sec",    mods = { "ITEM_MOD_MANA_REGENERATION_SHORT", "ITEM_MOD_POWER_REGEN0_SHORT" } },
+    { key = "def",   label = "Defense",           mods = { "ITEM_MOD_DEFENSE_SKILL_RATING_SHORT" } },
+    { key = "dodge", label = "Dodge",             mods = { "ITEM_MOD_DODGE_RATING_SHORT" } },
+    { key = "parry", label = "Parry",             mods = { "ITEM_MOD_PARRY_RATING_SHORT" } },
+    { key = "block", label = "Block",             mods = { "ITEM_MOD_BLOCK_RATING_SHORT", "ITEM_MOD_BLOCK_VALUE_SHORT" } },
+    { key = "resil", label = "Resilience",        mods = { "ITEM_MOD_RESILIENCE_RATING_SHORT" } },
+    { key = "hp5",   label = "Health per 5 sec",  mods = { "ITEM_MOD_HEALTH_REGEN_SHORT", "ITEM_MOD_HEALTH_REGENERATION_SHORT" } },
+    { key = "sock",  label = "Gem sockets",       mods = { "EMPTY_SOCKET_RED", "EMPTY_SOCKET_YELLOW", "EMPTY_SOCKET_BLUE",
+                                                           "EMPTY_SOCKET_META", "EMPTY_SOCKET_PRISMATIC" } },
+}
+local STAT_BIT_OF_MOD = {}   -- GetItemStats key -> bit value
+local STAT_BIT_OF_KEY = {}   -- our short key -> bit value
+for i, st in ipairs(Engine.STATS) do
+    local b = 2 ^ (i - 1)
+    st.bit = b
+    STAT_BIT_OF_KEY[st.key] = b
+    for _, m in ipairs(st.mods) do STAT_BIT_OF_MOD[m] = b end
+end
+
+-- [itemId] = mask of Engine.STATS bits (0 = carries none of them). Items the
+-- client has not cached yet are not stored: GetItemStats needs the item's
+-- link, so they are retried on the next check. An item's stats never change,
+-- so the cache survives data refreshes; Rescan clears it.
+local statMaskCache = {}
+local statScratch = {}
+
+function Engine.InvalidateStatCache()
+    statMaskCache = {}
+end
+
+function Engine.ItemStatMask(itemId)
+    local m = statMaskCache[itemId]
+    if m then return m end
+    local getStats = _G.GetItemStats
+    if not getStats then return nil end
+    local link = ANx.GetItemLink(itemId)
+    if not link then return nil end
+    for k in pairs(statScratch) do statScratch[k] = nil end
+    local ok, t = pcall(getStats, link, statScratch)
+    if not ok then return nil end
+    t = t or statScratch
+    m = 0
+    for mod, v in pairs(t) do
+        local b = STAT_BIT_OF_MOD[mod]
+        if b and v and v ~= 0 and band(m, b) == 0 then m = m + b end
+    end
+    statMaskCache[itemId] = m
+    return m
+end
+
+-- The saved selection is a plain string (",str,crit,"): a table would break
+-- favorites (keyed by tostring of each setting) and Reset filters (it copies
+-- the defaults value). Decoded once per distinct value.
+local selStr, selMask = nil, 0
+function Engine.StatSelectionMask()
+    local s = (ANx.db and ANx.db.statFilter) or ""
+    if s ~= selStr then
+        selStr, selMask = s, 0
+        for key in s:gmatch("[^,]+") do
+            local b = STAT_BIT_OF_KEY[key]
+            if b and band(selMask, b) == 0 then selMask = selMask + b end
+        end
+    end
+    return selMask
+end
+
+function Engine.StatAllowed(itemId)
+    local want = Engine.StatSelectionMask()
+    if want == 0 then return true end
+    local m = Engine.ItemStatMask(itemId)
+    if not m then return false end           -- not cached yet: can't confirm, hide
+    if (ANx.db.statMatch or "any") == "all" then return band(m, want) == want end
+    return band(m, want) ~= 0
+end
+
 function Engine.Eligible(itemId)
     if not (ANx.CanCount(itemId) and ANx.FactionAllowed(itemId)) then return false end
     if ANx.db and ANx.db.hideInBags and Engine.IsOwned(itemId) then return false end
@@ -979,6 +1085,7 @@ function Engine.Eligible(itemId)
     if ANx.db and ANx.db.scope == "char" and ANx.db.questClass ~= "all"
         and Engine.ItemQuestCharBlocked(itemId) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
+    if not Engine.StatAllowed(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
     -- prestige: the manual Class filter narrows every list to one class's gear
@@ -1330,6 +1437,7 @@ function Engine.ScopeLeft(itemId, scope)
     if not ANx.FactionAllowed(itemId) then return false end
     if ANx.db and ANx.db.hideInBags and Engine.IsOwned(itemId) then return false end
     if ANx.db and ANx.db.zoneExclusive and not Engine.IsZoneExclusive(itemId) then return false end
+    if not Engine.StatAllowed(itemId) then return false end
     if not ANx.BindAllowed(itemId) then return false end
     if not ANx.AccessoryAllowed(itemId) then return false end
     if ANx.db and ANx.db.prestige and (ANx.db.classFilter or "all") ~= "all"

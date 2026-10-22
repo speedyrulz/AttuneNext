@@ -122,6 +122,7 @@ Arrows use **Carbonite** if you have it, otherwise **TomTom**. With neither inst
 - **Accessories** — a global On/Off toggle. Cloaks, rings, necklaces and trinkets aren't restricted by armor type, so *any* of your characters can attune them account-wide. Turn Accessories **Off** to hide those and focus each character on the class-specific gear (armor of its type and its weapons) — the counts at every level drop accordingly. (Built-in for vendor gear, from the item's equip slot otherwise; uncached items are assumed non-accessory and re-checked on Rescan.)
 - **Zone-exclusive only** — a global toggle. When On, every level only counts and shows items that drop **nowhere but a single zone** — so you can see, right from the dungeon/zone list, how many exclusive items each place still has without clicking in. Great for prioritising a lockout.
 - **In bags: Show / Hide** — a global toggle. Set it to **Hide** and every list and count skips items you already carry (bags, bank, or equipped) but haven't attuned yet — you've looted them, so there's nothing left to chase. It updates by itself as you loot, bank, or equip things. Default is Show.
+- **Stats: Any / <stat>** — a global filter. Click it to open a picker and tick the stats you want (Strength, Agility, Spell Power, Hit, Crit, Haste, Expertise, Armor Penetration, Defense, Dodge, Parry, Block, Resilience, MP5, gem sockets and more). Every list, count and recommendation then shows only gear carrying them. *Show gear with* switches between **any** of the picked stats and **all** of them. Stats are read from the item, so random-enchant gear ("of the Bear") matches on its base stats only, and an item your client hasn't cached yet stays hidden until it is.
 - **Currency** — on vendor screens only. Filter to a currency type (Gold / Honor & Arena / Emblems & Marks / Other Tokens). You can set this **before** picking a zone, so you can, say, see only the zones that sell things for Emblems of Triumph.
 - **Rare spawns only** — on World Drops screens only. When On, only shows gear that can drop from a rare or rare-elite spawn, and the zone list counts/hides accordingly. Handy if you're hunting rares specifically. Zones are tagged `(rares)` while it's active.
 - **Stock** — on every vendor screen (the zone list, currency list, vendor list, and item list). Filters to All / Limited / Unlimited so you can find the limited-stock items (the ones that sell a few at a time and restock on a timer) or ignore them — counts update at each level. On a specific vendor it uses that vendor's exact stock; on the broader lists it flags an item as limited if any vendor sells it that way.
@@ -180,6 +181,11 @@ Press **Rescan** (top right) to throw the saved scan away and rebuild it — han
 ---
 
 ## Changelog
+
+**v4.1.0**
+
+- Added a **Stats** filter. Click the new *Stats* chip to pick any of 21 stats (primary stats, attack and spell power, hit, crit, haste, expertise, armor and spell penetration, the tank stats, resilience, MP5, HP5 and gem sockets) and every list, count, recommendation and filtered nameplate shows only gear carrying them. Match **any** picked stat or **all** of them. Stats are read with the client's own `GetItemStats` and cached for the session; the first time you pick a stat, a background sweep reads the whole item list.
+- When the filter chips need a third row (a prestige character on a vendor screen, or now a raid screen), the list moves down one row instead of the chips overlapping it.
 
 **v4.0.0**
 

@@ -21,6 +21,9 @@ function UI._TestClearEngine() Engine = nil end   -- regression coverage only
 
 local ROW_H = 50          -- title line + one description line, inside a card
 local VISIBLE_ROWS = 12
+-- When the filter chips need a third row the list moves down one chip row
+-- and shows one row fewer (the window keeps its size); see UI.ApplyListShift.
+local listShift, visibleRows = 0, VISIBLE_ROWS
 local FRAME_W = 700
 local SIDEBAR_W = 175   -- left navigation column
 local SIDE_W = 246      -- right detail column (browse screens)
@@ -976,6 +979,11 @@ local function CreateMainFrame()
         UI.Render()
     end)
 
+    f.statBtn = Chip("AttuneNextStatBtn", "filter", "Stat filter",
+        "Only show gear with the stats you pick (Strength, Haste, Spell Power...). Click to choose.", function()
+        if UI.Current().type == "stats" then UI.Pop() else UI.Push({ type = "stats" }) end
+    end)
+
     f.classBtn = Chip("AttuneNextClassBtn", "character", "Class filter (Prestige)",
         "Cycle which class's gear is shown. Unlocked by Prestige mode in Options.", function()
         local order = ANx.CLASS_ORDER
@@ -1063,6 +1071,7 @@ local function CreateMainFrame()
             if b:IsShown() then vis[#vis + 1] = b end
         end
         local n = #vis
+        UI.ApplyListShift(math.max(0, math.ceil(n / CHIP_PER_ROW) - 2) * CHIP_PITCH)
         if n == 0 then UI.lastChipLayout = { total = 0, rows = {} } return end
         local span = FRAME_W - 32                  -- CX+16 .. right edge -16
         local nrows = math.ceil(n / CHIP_PER_ROW)
@@ -1945,7 +1954,7 @@ function UI.CycleSearchType()
 end
 
 -- ---- favorites -------------------------------------------------------
-local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "hideInBags", "bindFilter",
+local FILTER_FIELDS = { "scope", "faction", "forge", "zoneExclusive", "hideInBags", "statFilter", "statMatch", "bindFilter",
     "accessories", "difficulty", "raidSize", "raresOnly", "vendorFilter", "questClass",
     "stockFilter", "affordableOnly", "classFilter" }
 
@@ -1963,6 +1972,7 @@ local function FilterSummary(f)
     if (f.forge or 1) > 1 then p[#p + 1] = "Forge " .. (ANx.FORGE_LABELS[f.forge] or f.forge) end
     if f.zoneExclusive then p[#p + 1] = "Zone-exclusive" end
     if f.hideInBags then p[#p + 1] = "Not in bags" end
+    if (f.statFilter or "") ~= "" then p[#p + 1] = UI.StatSummary(f.statFilter, f.statMatch) end
     if f.bindFilter == "bop" then p[#p + 1] = "BoP" elseif f.bindFilter == "boe" then p[#p + 1] = "BoE" end
     if f.accessories == false then p[#p + 1] = "No accessories" end
     if f.difficulty and f.difficulty ~= "all" then p[#p + 1] = (ANx.DIFF_TIER_LABELS[f.difficulty] or f.difficulty) end
@@ -2860,6 +2870,84 @@ end
 
 -- full Options screen (gear button): mirrors the Interface Options panel,
 -- then appends the AttuneNext button's own options below
+-- ---- stat filter ---------------------------------------------------------
+-- picked stat keys, in Engine.STATS order
+function UI.StatKeys(sel)
+    sel = sel or ANx.db.statFilter or ""
+    local out = {}
+    for _, st in ipairs((ANx.Engine and ANx.Engine.STATS) or {}) do
+        if sel:find("," .. st.key .. ",", 1, true) then out[#out + 1] = st end
+    end
+    return out
+end
+
+-- "Haste or Crit" / "Str + Agi + Sta" / "4 stats (any)"
+function UI.StatSummary(sel, match)
+    local picked = UI.StatKeys(sel)
+    if #picked == 0 then return "any stats" end
+    local joiner = ((match or "any") == "all") and " + " or " or "
+    if #picked <= 2 then
+        local names = {}
+        for _, st in ipairs(picked) do names[#names + 1] = st.label end
+        return table.concat(names, joiner)
+    end
+    return #picked .. " stats (" .. (((match or "any") == "all") and "all" or "any") .. ")"
+end
+
+function UI.StatChipLabel()
+    local picked = UI.StatKeys()
+    if #picked == 0 then return "|cffd8c8a8Stats: Any|r" end
+    if #picked == 1 then return "|cff66ccffStats: " .. picked[1].label .. "|r" end
+    return "|cff66ccffStats: " .. #picked .. " " .. (((ANx.db.statMatch or "any") == "all") and "(all)" or "(any)") .. "|r"
+end
+
+local function SetStatSelection(keys)
+    ANx.db.statFilter = (#keys > 0) and ("," .. table.concat(keys, ",") .. ",") or ""
+    Engine.InvalidateStats()   -- also queues the background stat sweep if needed
+    UI.Render()
+end
+
+builders["stats"] = function(view)
+    local picked = {}
+    for _, st in ipairs(UI.StatKeys()) do picked[st.key] = true end
+    local n = 0
+    for _ in pairs(picked) do n = n + 1 end
+    local matchAll = (ANx.db.statMatch or "any") == "all"
+    AddRow({
+        text = "|cffffd100Show gear with:|r  " .. (matchAll and "|cff66ccffall of the picked stats|r"
+            or "|cff66ccffany of the picked stats|r"),
+        sub = "Click to switch between 'any' (Haste OR Crit) and 'all' (Haste AND Crit).",
+        onClick = function()
+            ANx.db.statMatch = matchAll and "any" or "all"
+            Engine.InvalidateStats()
+            UI.Render()
+        end,
+    })
+    if n > 0 then
+        AddRow({
+            text = "|cffff8040Clear all|r  (" .. n .. " picked)",
+            sub = "Turn the stat filter off.",
+            onClick = function() SetStatSelection({}) end,
+        })
+    end
+    for _, st in ipairs(Engine.STATS or {}) do
+        local on = picked[st.key]
+        AddRow({
+            text = (on and "|cff00ff00[x]|r  " or "|cff666666[  ]|r  ") .. st.label,
+            onClick = function()
+                local keys = {}
+                for _, s2 in ipairs(Engine.STATS) do
+                    local want = picked[s2.key]
+                    if s2.key == st.key then want = not on end
+                    if want then keys[#keys + 1] = s2.key end
+                end
+                SetStatSelection(keys)
+            end,
+        })
+    end
+    AddRow({ text = "|cff888888Stats come from the item itself, so random-enchant gear (\"of the Bear\") is matched by its base stats only. Items your client has not cached yet stay hidden until they are.|r" })
+end
+
 builders["options"] = function(view)
     local function Sync()
         if ANx.SyncOptionsPanel then ANx.SyncOptionsPanel() end
@@ -3305,6 +3393,9 @@ builders["items"] = function(view)
             AddRow({ text = "|cff888888Nothing zone-exclusive left here (toggle 'Zone-exclusive only' off to see all)|r" })
         elseif ANx.db.hideInBags then
             AddRow({ text = "|cff888888Everything left here is already in your bags (set 'In bags' to Show to see them)|r" })
+        elseif (ANx.db.statFilter or "") ~= "" then
+            AddRow({ text = "|cff888888Nothing left here with " .. UI.StatSummary(ANx.db.statFilter, ANx.db.statMatch)
+                .. " (change the Stats chip)|r" })
         elseif view.worldDrop and ANx.db.raresOnly then
             AddRow({ text = "|cff888888No rare-spawn world drops left here (toggle 'Rare spawns only' off to see all)|r" })
         elseif ANx.ForgeLevel() <= 1 then
@@ -3680,6 +3771,7 @@ local function ViewTitle(view)
     local t = view.type
     if t == "root" then return "Home" end
     if t == "options" then return "Options" end
+    if t == "stats" then return "Stat filter  -  pick the stats you want" end
     if t == "browse" then return "Browse"
     elseif t == "contentTypes" then return "Filter by Content Type  -  Which Content?"
     elseif t == "contentExp" then return (CONTENT_LABELS[view.content] or "Content") .. "  -  Which Expansion?"
@@ -3733,7 +3825,7 @@ local NAV_SHORT = {
     whatsleftMats = "Crafting", whatsleftMatList = "Materials",
     whatsleftCur = "Currency", favorites = "Favorites", goals = "Goals",
     options = "Options", anextConfig = "AttuneNext Options", search = "Search",
-    sources = "Item", events = "Events",
+    sources = "Item", events = "Events", stats = "Stats",
 }
 local function CrumbLabel(v)
     local t = v.type
@@ -3759,7 +3851,7 @@ local NAV_OF = {
     contentTypes = "browse",
     contentExp = "browse", instances = "browse", zones = "browse", quests = "browse",
     currencies = "browse", vendors = "browse", profs = "browse", events = "browse",
-    items = "browse", sources = "browse", search = "browse",
+    items = "browse", sources = "browse", search = "browse", stats = "browse",
     anextConfig = "options", options = "options",
     whatsleft = "whatsleft", whatsleftScope = "whatsleft", whatsleftMats = "whatsleft",
     whatsleftMatList = "whatsleft", whatsleftCur = "whatsleft",
@@ -3969,6 +4061,7 @@ function UI.Render()
         and "Zone-excl. On" or "Zone-excl. Off") .. "|r")
     SetChip(f.bagsBtn, "stock", ANx.db.hideInBags
         and "|cffff8080In bags: Hide|r" or "|cffd8c8a8In bags: Show|r")
+    SetChip(f.statBtn, "filter", UI.StatChipLabel())
     if ANx.db.prestige then
         local cf = ANx.db.classFilter or "all"
         SetChip(f.classBtn, "character", (cf == "all") and "|cffd8c8a8Class: All|r"
@@ -4055,16 +4148,41 @@ end
 -- handler calls ONLY this: scrolling repaints the dozen visible row buttons;
 -- it never re-runs the view builder (UI.Render does the full rebuild, which
 -- used to run per wheel notch - an O(list) walk + re-sort per scroll step).
+-- Move the list area (scroll frame, row buttons, side pane) down by `shift`
+-- pixels, below a third row of filter chips. Rows that would run past the
+-- window's bottom edge are dropped from the visible set.
+function UI.ApplyListShift(shift)
+    if shift == listShift then return end
+    listShift = shift
+    visibleRows = VISIBLE_ROWS - math.ceil(shift / ROW_H)
+    local f = UI.frame
+    if not f then return end
+    for i, b in ipairs(rowButtons) do
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", CX + 20, -154 - shift - (i - 1) * ROW_H)
+        if i > visibleRows then b:Hide() end
+    end
+    if f.scroll and f.scroll.ClearAllPoints then
+        f.scroll:ClearAllPoints()
+        f.scroll:SetPoint("TOPLEFT", f, "TOPLEFT", CX + 16, -154 - shift)
+        f.scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36 - (UI.listSideW or 0), 38)
+    end
+    if f.sidePane and f.sidePane.ClearAllPoints then
+        f.sidePane:ClearAllPoints()
+        f.sidePane:SetPoint("TOPRIGHT", f, "TOPRIGHT", -20, -154 - shift)
+    end
+end
+
 function UI.PaintVisibleRows()
     local f = UI.frame
     if not f or not f:IsShown() then return end
     local total = #displayRows
-    FauxScrollFrame_Update(f.scroll, total, VISIBLE_ROWS, ROW_H)
+    FauxScrollFrame_Update(f.scroll, total, visibleRows, ROW_H)
     local offset = FauxScrollFrame_GetOffset(f.scroll)
 
     for i = 1, VISIBLE_ROWS do
         local b = rowButtons[i]
-        local r = displayRows[i + offset]
+        local r = (i <= visibleRows) and displayRows[i + offset] or nil
         if r then
             UI.FitText(b.text, r.text or "", b.anxTextW)
             UI.FitText(b.sub, r.sub or "", (b.anxTextW or 200) * 2 - 16)
@@ -4192,9 +4310,10 @@ function UI.ApplyListWidth(withPane)
         if UI.LayoutCard then UI.LayoutCard(b, rowW, ROW_H - 2) end
     end
     UI.narrowList = withPane
+    UI.listSideW = side
     if f.scroll and f.scroll.ClearAllPoints then
         f.scroll:ClearAllPoints()
-        f.scroll:SetPoint("TOPLEFT", f, "TOPLEFT", CX + 16, -154)
+        f.scroll:SetPoint("TOPLEFT", f, "TOPLEFT", CX + 16, -154 - listShift)
         f.scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36 - side, 38)
     end
 end
@@ -4450,6 +4569,10 @@ function UI.FilterDefs(view)
     end
     add("Zone-excl: " .. (ANx.db.zoneExclusive and "On" or "Off"), function()
         ANx.db.zoneExclusive = not ANx.db.zoneExclusive
+    end)
+    add(((ANx.db.statFilter or "") ~= "") and ("Stats: " .. #UI.StatKeys() .. " picked") or "Stats: Any", function()
+        UI.Show(true)
+        if UI.Current().type ~= "stats" then UI.Push({ type = "stats" }) end
     end)
     add("In bags: " .. (ANx.db.hideInBags and "Hide" or "Show"), function()
         ANx.db.hideInBags = not ANx.db.hideInBags
