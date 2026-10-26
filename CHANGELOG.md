@@ -2,9 +2,10 @@
 
 All notable changes to AttuneNext, newest first. Usage documentation lives in the [Wiki](https://github.com/speedyrulz/AttuneNext/wiki).
 
-## Unreleased
+## v4.1.1
 
 - The **Stats** filter now includes **resistances**: Fire, Nature, Frost, Shadow and Arcane Resistance (26 stats in all). Armor is not counted as a resistance.
+- The version bump rebuilds the saved scan once on first login.
 
 ## v4.1.0
 
