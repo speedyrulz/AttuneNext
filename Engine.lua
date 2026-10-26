@@ -1002,6 +1002,12 @@ Engine.STATS = {
     { key = "block", label = "Block",             mods = { "ITEM_MOD_BLOCK_RATING_SHORT", "ITEM_MOD_BLOCK_VALUE_SHORT" } },
     { key = "resil", label = "Resilience",        mods = { "ITEM_MOD_RESILIENCE_RATING_SHORT" } },
     { key = "hp5",   label = "Health per 5 sec",  mods = { "ITEM_MOD_HEALTH_REGEN_SHORT", "ITEM_MOD_HEALTH_REGENERATION_SHORT" } },
+    -- resistances come back as RESISTANCEn_NAME (0 = armor, 1 = holy: never on gear)
+    { key = "rfire", label = "Fire Resistance",   mods = { "RESISTANCE2_NAME" } },
+    { key = "rnat",  label = "Nature Resistance", mods = { "RESISTANCE3_NAME" } },
+    { key = "rfrost", label = "Frost Resistance", mods = { "RESISTANCE4_NAME" } },
+    { key = "rshad", label = "Shadow Resistance", mods = { "RESISTANCE5_NAME" } },
+    { key = "rarc",  label = "Arcane Resistance", mods = { "RESISTANCE6_NAME" } },
     { key = "sock",  label = "Gem sockets",       mods = { "EMPTY_SOCKET_RED", "EMPTY_SOCKET_YELLOW", "EMPTY_SOCKET_BLUE",
                                                            "EMPTY_SOCKET_META", "EMPTY_SOCKET_PRISMATIC" } },
 }

@@ -2,6 +2,10 @@
 
 All notable changes to AttuneNext, newest first. Usage documentation lives in the [Wiki](https://github.com/speedyrulz/AttuneNext/wiki).
 
+## Unreleased
+
+- The **Stats** filter now includes **resistances**: Fire, Nature, Frost, Shadow and Arcane Resistance (26 stats in all). Armor is not counted as a resistance.
+
 ## v4.1.0
 
 - Added a **Stats** filter. Click the new *Stats* chip to pick any of 21 stats (primary stats, attack and spell power, hit, crit, haste, expertise, armor and spell penetration, the tank stats, resilience, MP5, HP5 and gem sockets) and every list, count, recommendation and filtered nameplate shows only gear carrying them. Match **any** picked stat or **all** of them. Stats are read with the client's own `GetItemStats` and cached for the session; the first time you pick a stat, a background sweep reads the whole item list.
