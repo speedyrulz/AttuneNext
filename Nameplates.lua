@@ -59,6 +59,7 @@ local indexGen    = 1       -- bumped whenever needByName/learned change, so
 
 local staging, zoneSeen, zoneQueue, zoneAt, zoneBuilding
 local rebuildQueued, builtZone
+local learnedZone           -- zone name the `learned` answers belong to
 
 local function Cfg()
     return (ANx.db and ANx.db.plates) or { mode = "off", scope = "acct", pulse = true }
@@ -229,11 +230,24 @@ local function IndexItem(itemId)
     end
 end
 
+-- A new zone: answers learned by sight are keyed by NPC name alone, so last
+-- zone's "Skeleton" must not override this zone's index for a different
+-- Skeleton. Run on the zone event itself (the rebuild comes 1.5-10 s later)
+-- and again by the rebuild; an unknown zone keeps the old index but not the
+-- old zone's sightings. Subzone moves keep them: the zone name is unchanged.
+local function ForgetOtherZone(zname)
+    if zname == learnedZone then return end
+    learned = {}
+    learnedZone = zname
+    indexGen = indexGen + 1
+end
+
 function NP.RebuildZoneIndex(force)
     rebuildQueued = false
     if not NP.Enabled() or not ANx.dataReady then return end
     local zid, zname, inst = CurrentZoneId()
     if not zname then return end
+    ForgetOtherZone(zname)
     if not force and zname == builtZone and not zoneBuilding then return end
 
     local list = {}
@@ -391,7 +405,10 @@ local function Learn(name, info)
         -- NPC names are not unique per entry id: an exact "nothing" from ONE
         -- entry must not blank the marks of same-named entries the zone index
         -- knows still drop something - defer to the index for those
-        local newVal = (zone and (zone.drop or 0) > 0) and nil or false
+        -- (written out: "x and nil or false" is always false, which is how
+        -- the v3.6.0 version of this fix never took effect)
+        local newVal = false
+        if zone and (zone.drop or 0) > 0 then newVal = nil end
         if learned[key] == newVal then return false end
         learned[key] = newVal
     end
@@ -697,7 +714,11 @@ end
 
 -- Zone changes arrive through Core's dispatcher
 function NP.OnZone()
-    if NP.Enabled() then QueueRebuild() end
+    if NP.Enabled() then
+        local _, zname = CurrentZoneId()
+        if zname then ForgetOtherZone(zname) end
+        QueueRebuild()
+    end
 end
 
 -- The server data just became usable: the login-time rebuild bailed on

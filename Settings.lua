@@ -131,10 +131,18 @@ local function BuildPanel()
         end)
     controls.focus = MakeCheck("Focus", "Focus the place with the most left", RX, RY + STEP,
         function() return ANx.db.anext.focus end,
-        function(v) ANx.db.anext.focus = v end)
+        function(v)
+            ANx.db.anext.focus = v
+            -- the button's pick is cached per revision: without this it kept
+            -- the old answer (the in-addon Options screen already did this)
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+        end)
     controls.droprate = MakeCheck("DropRate", "Factor in drop rates", RX, RY + STEP * 2,
         function() return ANx.db.anext.dropRate end,
-        function(v) ANx.db.anext.dropRate = v end)
+        function(v)
+            ANx.db.anext.dropRate = v
+            if ANx.Engine then ANx.Engine.InvalidateStats() end
+        end)
     local runBtn = CreateFrame("Button", "AttuneNextRunModeBtn", panel, "UIPanelButtonTemplate")
     runBtn:SetWidth(268); runBtn:SetHeight(22)
     runBtn:SetPoint("TOPLEFT", RX + 2, RY + STEP * 3 - 2)
@@ -214,6 +222,7 @@ local function BuildPanel()
         ANx.db.anext.ignoreInst = {}
         ANx.Print("AttuneNext ignore list cleared.")
         self:SetText("Reset ignore list (0)")
+        if ANx.Engine then ANx.Engine.InvalidateStats() end   -- re-pick without the ignores
         if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
     end)
     ignoreBtn:ClearAllPoints()
