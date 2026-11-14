@@ -1,0 +1,63 @@
+{
+  "configVersion": 1,
+  "name": "AttuneNext",
+  "approval": {
+    "default": "ask-each-step",
+    "source": "Memory attunenext-workflow (2026-11-14, newest, stricter, wins): \"Jeff asks for each outward step explicitly and separately: commit, push, build the zip, create the GitHub release, copy into AddOns. Do not push or publish without being told.\" Older memory release-and-wiki-every-commit (2026-10-26): every commit to main gets a version bump, a published release and a wiki update when relevant; user's words: \"always update the wiki in the future when there are relevant changes... create and publish a new release... always do so with each commit\"."
+  },
+  "checks": [],
+  "neverStage": ["AGENTS.md", "CLAUDE.md", "update.bat"],
+  "delivery": {
+    "mode": "direct-push",
+    "base": "main",
+    "ci": "none",
+    "commitStyle": "The change in its own commit(s), then a separate version commit \"vX.Y.Z: <summary>\" holding the Core.lua / .toc bump and the new CHANGELOG.md entry, e.g. \"v4.1.2: audit fixes (B1-B10, P1-P3)\"."
+  },
+  "version": {
+    "source": "files",
+    "bump": "ask",
+    "when": "in-commit",
+    "files": [
+      { "path": "Core.lua", "regex": "^ANx\\.VERSION\\s*=\\s*\"([^\"]+)\"" },
+      { "path": "AttuneNext.toc", "regex": "^## Version:\\s*(\\S+)" }
+    ]
+  },
+  "tag": {
+    "pattern": "v{version}",
+    "create": "push"
+  },
+  "release": {
+    "mode": "gh",
+    "title": "v{version}",
+    "latest": true,
+    "notesFrom": "changelog",
+    "changelog": "CHANGELOG.md",
+    "notesStyle": "**v{version}** on the first line, then the body of the top CHANGELOG.md entry (the '## vX.Y.Z' heading itself left out).",
+    "assets": [
+      { "gitArchive": { "name": "AttuneNext-v{version}.zip", "prefix": "AttuneNext/" } }
+    ],
+    "skipWhenOnly": [".claude/**", "README.md", "CHANGELOG.md", "docs/**"]
+  },
+  "wiki": {
+    "enabled": true,
+    "when": "user-visible",
+    "url": "https://github.com/speedyrulz/AttuneNext.wiki.git",
+    "branch": "master",
+    "clone": "scratchpad",
+    "public": true,
+    "pages": [
+      { "paths": ["*.lua"], "pages": ["Getting-Started.md", "Slash-Commands.md", "FAQ-and-Troubleshooting.md"] },
+      { "paths": ["Data_*.lua"], "pages": ["Data-Sources-and-Credits.md"] },
+      { "paths": ["AttuneNext.toc"], "pages": ["Installation.md"] },
+      { "paths": ["docs/**"], "pages": ["Developer-Notes.md"] }
+    ],
+    "review": ["Home.md", "_Sidebar.md"],
+    "order": "after-release",
+    "rules": "Push wiki edits right after the release, so the wiki never describes unreleased behaviour. Developer-Notes has a 'Releasing' section that documents these steps: update it if the routine changes."
+  },
+  "pulls": {
+    "mainCheckout": true
+  },
+  "extraSteps": [],
+  "notes": "Ask before each step: commit, push, tag + zip + release, wiki. Finish the change, run the headless harness (docs/perf-audit/tools/harness_scenarios.py, from a scratch copy of the tools because scenario runs drop files into tools/), report, then offer the commit. The live checkout IS the installed addon (C:\\World of Warcraft\\Interface\\AddOns\\AttuneNext, branch main): commits are live on the next /reload, so there is no copy-into-AddOns step. git fetch first: main has moved under a clone before. Write the new top CHANGELOG.md entry ('## vX.Y.Z') by hand in the version commit; it is not a version field (every past heading would match). The zip is git archive --format=zip --prefix=AttuneNext/ of the tag (docs/ is export-ignore); the memory keeps release zips in C:\\coding\\Attunenext\\outputs. The repo stores LF and checks out CRLF (autocrlf): exact-match edit scripts must normalise line endings. Keep .claude/ship.json untracked (.git/info/exclude) or add '.claude/ export-ignore' to .gitattributes, or it ends up in the players' zip. Engine.lua changes are ported to AttuneNext-Simple (clone C:\\coding\\Attunenext\\AttuneNext-Simple) by regenerating its Engine.lua; Simple has no ship rule, and installing it into AddOns is a separate step the user approves. Never stage the untracked update.bat."
+}
