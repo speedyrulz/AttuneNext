@@ -2,6 +2,22 @@
 
 All notable changes to AttuneNext, newest first. Usage documentation lives in the [Wiki](https://github.com/speedyrulz/AttuneNext/wiki).
 
+## v4.1.2
+
+*Fixes from a code audit of v4.1.1. Your saved scan is rebuilt once on first login (the version changed, and saved scans now carry a format stamp, so any saved in the broken state described in the first fix are rebuilt too).*
+
+- **An interrupted login scan no longer wipes zone lists.** Running `/an reset` or pressing *Rescan loot DB* (or a second data-ready event) while the login scan was partway through an item could empty every zone's quest, world-drop and vendor lists, and that empty result was saved. An interrupted scan now starts from clean working tables. In the headless harness this emptied all 72 test zones before the fix and none after.
+- **Changing a filter while a background job runs no longer leaves old results on screen.** The pick on the AttuneNext button, the run ranking and *What's Left* are redone once with the new filters instead of showing results computed under the old ones as current.
+- **Zone recommendations count only items you can get in that zone.** The ranking reads each zone's own quest and world-drop lists instead of asking the server for the zone's item list. An item listed in a zone whose quest or drop is in another zone no longer counts toward this one, so some zone scores and their order change. The first Home screen after a quick login no longer makes about 71 server zone requests (60-140 ms each in game).
+- **Lists open at the top.** *Back* and the breadcrumbs return to where you were in the parent list, and refining a search starts at the top. Breadcrumbs also clear the previously selected item.
+- **The Stats filter no longer hides items your client hasn't loaded yet.** It asks the server about them 200 at a time every 5 seconds and recounts after each batch.
+- **Track as a goal** in the item pane now reads *Tracked - remove* for a goal you already track. Before, it always read *Track as a goal*, so clicking it on a tracked goal removed that goal. Goals saved from single-difficulty instances are converted to whole-instance goals and duplicates removed.
+- **Favorites** saved by older versions match and restore correctly again, and removing a favorite also removes any duplicate copies.
+- **Nameplates:** an NPC whose name is shared with another entry that still drops something in the zone keeps its mark (this fix from v3.6.0 never took effect), and marks learned in one zone are cleared when you enter another.
+- **The zone note and instance HUD** no longer go missing when you change zones during the login scan.
+- **Interface panel:** changing *Focus*, *Factor in drop rates* or *Reset ignore list* now updates the AttuneNext button straight away.
+- **Faster filters:** the *Rares only* check is remembered per item, and the *Faction* and *Class* filters no longer re-read the tooltip of an item your client hasn't loaded on every recount; they ask the server for it once.
+
 ## v4.1.1
 
 - The **Stats** filter now includes **resistances**: Fire, Nature, Frost, Shadow and Arcane Resistance (26 stats in all). Armor is not counted as a resistance.
