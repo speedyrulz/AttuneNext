@@ -373,6 +373,9 @@ function W.Show()
     W.savedStack = ANx.UI.stack
     ANx.UI.stack = { { type = "browse" } }
     ANx.UI.renderTarget = W
+    -- a fresh stack starts at the top of its list (after renderTarget: the
+    -- reset applies to the window driving the stack)
+    if ANx.UI.ResetScroll then ANx.UI.ResetScroll() end
     if ANx.db and ANx.db.scale then f:SetScale(ANx.db.scale) end
     for exp = 1, 3 do ANx.Engine.GetSummary(exp, W.Render) end
     f:Show()

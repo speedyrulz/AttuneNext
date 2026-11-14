@@ -182,18 +182,73 @@ end
 -- ---------------------------------------------------------------------
 UI.stack = {}
 
+-- A different screen starts its list at the top, and Back returns to where
+-- the parent list was. Nothing used to touch the FauxScrollFrame offset
+-- (FauxScrollFrame_Update only clamps it), so a zone's item list opened at
+-- whatever row the previous, longer list was scrolled to, with its best
+-- items hidden above.
+
+-- the list of the window showing the stack: the main window, or the Browse
+-- window while it drives it (nil for any other standalone window)
+local function ActiveScroll()
+    local t = UI.renderTarget
+    if t == nil then return _G.AttuneNextScroll end
+    if t == ANx.WinBrowse then return _G.AttuneNextBrowseScroll end
+    return nil
+end
+
+local function ScrollBarOf(sf)
+    local name = sf and sf.GetName and sf:GetName()
+    return name and _G[name .. "ScrollBar"]
+end
+
+function UI.ResetScroll()
+    local sf = ActiveScroll()
+    if not sf then return end
+    -- the bar first: its change handler recomputes the offset from its value
+    local bar = ScrollBarOf(sf)
+    if bar and bar.SetValue then bar:SetValue(0) end
+    if FauxScrollFrame_SetOffset then FauxScrollFrame_SetOffset(sf, 0) end
+end
+
+local function CurrentScrollOffset()
+    local sf = ActiveScroll()
+    return (sf and FauxScrollFrame_GetOffset and FauxScrollFrame_GetOffset(sf)) or 0
+end
+
+-- Put the list back at row `off`. Only valid after a Render: that is what
+-- gives the bar this list's range (FauxScrollFrame_Update), and the bar
+-- clamps a value past it. Its change handler sets the offset and repaints.
+local function RestoreScroll(off)
+    if not (off and off > 0) then return end
+    local bar = ScrollBarOf(ActiveScroll())
+    if bar and bar.SetValue and bar.GetValueStep then
+        bar:SetValue(off * (bar:GetValueStep() or 0))
+    end
+end
+
+-- back to an earlier screen still on the stack (Back, a breadcrumb)
+function UI.PopTo(depth)
+    if depth < 1 or #UI.stack <= depth then return end
+    UI.selectedItem = nil
+    for k = #UI.stack, depth + 1, -1 do table.remove(UI.stack, k) end
+    UI.ResetScroll()
+    UI.Render()
+    local view = UI.Current()
+    RestoreScroll(view and view.scrollOff)
+end
+
 function UI.Push(view)
     UI.selectedItem = nil    -- a new screen starts with nothing selected
+    local cur = UI.Current()
+    if cur then cur.scrollOff = CurrentScrollOffset() end   -- for Back
     table.insert(UI.stack, view)
+    UI.ResetScroll()
     UI.Render()
 end
 
 function UI.Pop()
-    if #UI.stack > 1 then
-        UI.selectedItem = nil
-        table.remove(UI.stack)
-        UI.Render()
-    end
+    UI.PopTo(#UI.stack - 1)
 end
 
 function UI.Current()
@@ -773,7 +828,10 @@ local function CreateMainFrame()
             end
             UI._searchWaiting = nil
             local cur = UI.Current()
-            if cur and cur.type == "search" then UI.Render() end
+            if cur and cur.type == "search" then
+                UI.ResetScroll()          -- a refined query is a new list
+                UI.Render()
+            end
         end
         ANx.After(0.25, fire, "search-debounce")
     end
@@ -888,10 +946,9 @@ local function CreateMainFrame()
             cb.anxLabel = lbl
             cb:SetScript("OnClick", function(self)
                 local target = self.anxStackIndex
-                if target and #UI.stack > target then
-                    for k = #UI.stack, target + 1, -1 do table.remove(UI.stack, k) end
-                    UI.Render()
-                end
+                -- same path as Back: clears the selection (the parent used
+                -- to show the child's detail card) and restores its scroll
+                if target then UI.PopTo(target) end
             end)
             f.crumbBtns[n] = cb
         end
@@ -2034,14 +2091,34 @@ function UI.SerializeView(view)
     return nil
 end
 
+-- A filter field a favorite has no value for (saved before that filter
+-- existed) means that filter's default.
+local function FilterValue(f, k)
+    local v = f[k]
+    if v == nil and ANx.FilterDefault then v = ANx.FilterDefault(k) end
+    return v
+end
+
 local function DescKey(d, f)
     local parts = {}
     for k, v in pairs(d) do parts[#parts + 1] = k .. "=" .. tostring(v) end
     table.sort(parts)
     local fp = {}
-    for _, k in ipairs(FILTER_FIELDS) do fp[#fp + 1] = tostring(f[k]) end
+    for _, k in ipairs(FILTER_FIELDS) do fp[#fp + 1] = tostring(FilterValue(f, k)) end
     fp[#fp + 1] = tostring(f.sort)
     return table.concat(parts, "&") .. "|" .. table.concat(fp, ",")
+end
+
+-- A favorite's key, rebuilt from what it saved rather than read from the key
+-- string stored with it: that string froze the FILTER_FIELDS list of the
+-- version that saved it, so every new filter (hideInBags in v3.6.1, the
+-- Stats filter in v4.1) left older favorites unmatchable - "Fav +" showed,
+-- and pressing it saved a duplicate.
+local function FavKey(fav)
+    if type(fav.desc) == "table" and type(fav.filters) == "table" then
+        return DescKey(fav.desc, fav.filters)
+    end
+    return fav.key
 end
 
 function UI.FavIndexOfCurrent()
@@ -2050,7 +2127,7 @@ function UI.FavIndexOfCurrent()
     if not d then return nil end
     local key = DescKey(d, FilterSnapshot(view.type))
     for i, fav in ipairs(ANx.db.favorites or {}) do
-        if fav.key == key then return i end
+        if FavKey(fav) == key then return i end
     end
     return nil
 end
@@ -2065,13 +2142,20 @@ function UI.ToggleFavorite()
     ANx.db.favorites = ANx.db.favorites or {}
     local filters = FilterSnapshot(view.type)
     local key = DescKey(d, filters)
-    for i, fav in ipairs(ANx.db.favorites) do
-        if fav.key == key then
+    -- remove EVERY match: the old frozen keys let a screen be saved twice,
+    -- and those copies now share one key
+    local removed
+    for i = #ANx.db.favorites, 1, -1 do
+        local fav = ANx.db.favorites[i]
+        if FavKey(fav) == key then
             table.remove(ANx.db.favorites, i)
-            ANx.Print("Favorite removed: " .. (fav.label or "?"))
-            UI.Render()
-            return
+            removed = fav
         end
+    end
+    if removed then
+        ANx.Print("Favorite removed: " .. (removed.label or "?"))
+        UI.Render()
+        return
     end
     local label = UI.Title and UI.Title(view) or (view.title or view.type)
     table.insert(ANx.db.favorites, {
@@ -2082,9 +2166,12 @@ function UI.ToggleFavorite()
 end
 
 function UI.RestoreFavorite(fav)
-    -- apply the saved filters
+    -- apply the saved filters; one the favorite predates goes back to its
+    -- default (skipping it kept the current Stats filter on a restored v4.0
+    -- favorite)
     for _, k in ipairs(FILTER_FIELDS) do
-        if fav.filters[k] ~= nil then ANx.db[k] = fav.filters[k] end
+        local v = FilterValue(fav.filters, k)
+        if v ~= nil then ANx.db[k] = v end
     end
     ANx.db.sort = ANx.db.sort or {}
     ANx.db.sort[fav.desc.type] = fav.filters.sort
@@ -4245,6 +4332,7 @@ function UI.Show(reset)
     end
     if reset or #UI.stack == 0 then
         UI.stack = { { type = "root" } }
+        UI.ResetScroll()
         UI.searchQuery = ""
         if UI.frame.searchBox then
             UI._searchSetting = true
@@ -4996,7 +5084,7 @@ function UI.UpdateSidePane()
             UI.FitText(rc.name, "|cffffd100" .. r.inst.name .. RunLabel(r.d) .. "|r", (SIDE_W - 116) * 2)
             rc.line1:SetText("|cffbfae86Best run here|r")
             trackGoal = { kind = "inst", map = r.inst.map, name = r.inst.name,
-                          diff = r.d.label,
+                          diff = (r.d.label ~= "" and r.d.label) or nil,
                           diffText = ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[r.d.label] }
         end
         rc.line2:SetText(string.format("|cff00ff88~%.1f new attunes|r  -  %d left%s",
@@ -5039,9 +5127,13 @@ function UI.UpdateSidePane()
     -- track-goal button: instance screens + instance recommendations
     local goal
     if view.type == "items" and view.instMap then
+        -- a single-difficulty instance has label "": that is the whole
+        -- instance (key "i<map>:*", as the list's own track row builds it),
+        -- not a separate "i<map>:" goal that would duplicate it
+        local d = view.instDiff
         goal = { kind = "inst", map = view.instMap, name = view.instName,
-                 diff = view.instDiff,
-                 diffText = ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[view.instDiff or ""] }
+                 diff = (d ~= "" and d) or nil,
+                 diffText = ANx.DIFF_LABEL_TEXT and ANx.DIFF_LABEL_TEXT[d or ""] }
     elseif view.type == "instances" then
         goal = { kind = "content", exp = view.exp, content = view.kind }
     elseif trackGoal then
@@ -5057,7 +5149,10 @@ function UI.UpdateSidePane()
         rc.goBtn:SetPoint("BOTTOMLEFT", rc, "BOTTOMLEFT", 30, 28)
     end
     if goal then
-        local tracked = UI.GoalTracked and UI.GoalTracked(goal)
+        -- GoalTracked compares keys: passing the goal table never matched,
+        -- so the label always offered "Track" and a click on a tracked goal
+        -- silently removed it
+        local tracked = UI.GoalTracked and UI.GoalTracked(Engine.GoalKey(goal))
         rc.trackBtn.anxLabel:SetText(tracked and "|cff33ff99Tracked - remove|r"
             or "|cffe3c98fTrack as a goal|r")
         rc.trackBtn.anxGoal = goal

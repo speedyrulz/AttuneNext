@@ -236,6 +236,12 @@ local function ApplyDefaults(db, def)
     end
 end
 
+-- A setting's shipped default (favorites saved before a filter existed are
+-- read as that filter's default).
+function ANx.FilterDefault(k)
+    return defaults[k]
+end
+
 -- Every filter the chip row / lists honor, reset from the defaults table.
 -- ONE shared implementation: the two "reset filters" buttons each carried
 -- their own (different, both incomplete) key lists.
@@ -569,8 +575,9 @@ local cacheRequested = {}   -- ask the server about each unresolved id at most
                             -- once per session (SetHyperlink IS a server query;
                             -- un-deduped it re-fired for the same ids on every
                             -- render of a list containing them)
+-- Returns true when a query was actually sent (false: asked before).
 function ANx.RequestItemCache(itemId)
-    if cacheRequested[itemId] then return end
+    if cacheRequested[itemId] then return false end
     cacheRequested[itemId] = true
     perf.cacheReq = perf.cacheReq + 1
     if not cacheTip then
@@ -578,6 +585,7 @@ function ANx.RequestItemCache(itemId)
         cacheTip:SetOwner(WorldFrame, "ANCHOR_NONE")
     end
     pcall(cacheTip.SetHyperlink, cacheTip, "item:" .. itemId)
+    return true
 end
 
 -- ---------------------------------------------------------------------
@@ -1108,6 +1116,13 @@ local classLockPattern
 function ANx.ClassLock(itemId)
     local c = classLockCache[itemId]
     if c ~= nil then return c or nil end
+    -- not in the client cache: the scrape below would come back empty and
+    -- cache nothing, so every recount re-sent the SetHyperlink query. Ask
+    -- the server once (deduped) and scrape when the item has resolved.
+    if not ANx.GetItemName(itemId) then
+        ANx.RequestItemCache(itemId)
+        return nil
+    end
     if not CreateFrame then return nil end
     if not bindTip then
         bindTip = CreateFrame("GameTooltip", "AttuneNextBindTip", nil, "GameTooltipTemplate")
@@ -1266,6 +1281,12 @@ function ANx.ItemFactionOf(itemId)
     if seed then
         ANx.FlagSet(itemId, ANx.F_FAC, 3, seed == "A" and 2 or 3)
         return seed
+    end
+    -- same guard as ClassLock: no repeated server queries for an item the
+    -- client hasn't cached (its tooltip would be empty and nothing stored)
+    if not ANx.GetItemName(itemId) then
+        ANx.RequestItemCache(itemId)
+        return nil
     end
     if not CreateFrame then return nil end
     if not factionTip then
@@ -1820,6 +1841,24 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
             if r then
                 r.focus, r.dropRate = a.focus, a.dropRate
             end
+        end
+        -- the side pane used to save a single-difficulty instance goal with
+        -- diff "" (key "i<map>:"); it now uses the whole-instance goal
+        -- (diff nil, key "i<map>:*") like the list does, so convert old ones
+        -- and drop the duplicates that makes
+        if type(ANx.db.goals) == "table" and ANx.Engine and ANx.Engine.GoalKey then
+            local seen, kept, dup = {}, {}, false
+            for _, g in ipairs(ANx.db.goals) do
+                if type(g) == "table" and g.kind == "inst" and g.diff == "" then g.diff = nil end
+                local key = type(g) == "table" and ANx.Engine.GoalKey(g) or nil
+                if key and seen[key] then
+                    dup = true
+                else
+                    if key then seen[key] = true end
+                    kept[#kept + 1] = g
+                end
+            end
+            if dup then ANx.db.goals = kept end
         end
         if ANx.InitSettings then ANx.InitSettings() end
         if ANx.Plates and ANx.Plates.Init then ANx.Plates.Init() end

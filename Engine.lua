@@ -32,6 +32,9 @@ local profCache     = {}   -- [prof.."-"..exp]-> { entries = { {id, spell, skill
 local statsCache    = {}   -- [key]           -> { attuned=, total= , best= {id, chance, srcName} }
 local summaryCache  = {}   -- [exp]           -> { D=set, R=set, Q=set, W=set, V=set, C=set, ready=bool }
 local remainingCache       -- "What's Left" report (lazy; nil = rebuild)
+local remainingGen = 0     -- bumped by every invalidation of remainingCache: a
+                           -- background build that saw it change is stale
+local rareMemo = {}        -- [itemId] -> false | { [zoneLower] = true } (rare-mob zones)
 local clearChanceCache = {} -- ["item|zone"]  -> per-clear drop chance
 local runsCache = {}       -- ["mode|ctx"]   -> { rev =, runs = }
 local pickCache = {}       -- ["which|view"] -> { rev =, id = itemId or false }
@@ -89,11 +92,13 @@ local function BumpRev() Engine.rev = Engine.rev + 1 end
 
 function Engine.InvalidateRemaining()
     remainingCache = nil
+    remainingGen = remainingGen + 1
 end
 
 function Engine.InvalidateStats()
     statsCache = {}
     remainingCache = nil
+    remainingGen = remainingGen + 1
     clearChanceCache = {}
     runsCache = {}
     pickCache = {}
@@ -113,6 +118,8 @@ function Engine.InvalidateAll()
     limitedItemsSet = nil
     eventItemsCache = {}
     remainingCache = nil
+    remainingGen = remainingGen + 1
+    rareMemo = {}
     clearChanceCache = {}
     runsCache = {}
     pickCache = {}
@@ -129,6 +136,7 @@ function Engine.InvalidateAll()
     cachesWarm = false
     warmed = {}            -- every predicate must be swept again
     scanMemo, qvMemo = nil, nil   -- the scan-lifetime classification memo
+    if Engine.ResetMemoScratch then Engine.ResetMemoScratch() end
     BumpRev()
     Engine.universeCache = nil
     Engine.scanJobs = {}
@@ -182,6 +190,12 @@ local function ArrayToSet(a)
     return s
 end
 
+-- Bumped when a saved structure must not be trusted whatever the version.
+-- 2: structures saved before the B1 fix may have had every zone's quest,
+-- world and vendor lists emptied by an interrupted login scan, and the zone
+-- ranking now reads those lists. Old saves carry no format and rebuild once.
+local STRUCT_FMT = 2
+
 function Engine.ExportCache()
     if not (ANx.db and ANx.LootDbLoaded()) then return end
     local sums = {}
@@ -200,6 +214,7 @@ function Engine.ExportCache()
     ANx.db.structCache = {
         version = _G.ItemLocIsLoaded(),
         rev = ANx.VERSION,
+        fmt = STRUCT_FMT,
         inst = instDiffCache,
         zones = zoneCache,
         summaries = sums,
@@ -213,7 +228,7 @@ end
 function Engine.ImportCache(provisional)
     local sc = ANx.db and ANx.db.structCache
     if not sc then return false end
-    if sc.rev ~= ANx.VERSION then
+    if sc.rev ~= ANx.VERSION or sc.fmt ~= STRUCT_FMT then
         ANx.db.structCache = nil
         return false
     end
@@ -418,6 +433,40 @@ end)
 -- so warming all of them meant (for a default setup) thousands of wasted
 -- tooltip scans and source walks at every login. Warm what the current
 -- filters actually read; anything switched on later gets a top-up sweep.
+-- Items the client hasn't cached have no stats to read, so StatAllowed lets
+-- them through. A count never displays them, so nothing else would ask the
+-- server for them: the stat sweep queues them and asks in batches (each ask
+-- is a server query), recounting after each batch has had time to resolve.
+local STAT_ASK_CAP = 200     -- server item queries per batch
+local STAT_RECHECK_S = 5     -- seconds from a batch to its recount (and the next batch)
+local statPending            -- uncached ids the stat sweep queued, not asked yet
+local statRecheckOn = false
+
+local function StatAskBatch()
+    local sent = 0
+    while statPending and sent < STAT_ASK_CAP do
+        local n = #statPending
+        if n == 0 then statPending = nil; break end
+        local id = statPending[n]
+        statPending[n] = nil
+        -- RequestItemCache is false for an id asked before, which costs no
+        -- batch slot (a Core whose version returns nothing counts every call)
+        if not ANx.GetItemName(id) and ANx.RequestItemCache(id) ~= false then sent = sent + 1 end
+    end
+    return sent
+end
+
+local function StatRecheck()
+    statRecheckOn = false
+    Engine.InvalidateStats()
+    if ANx.UI and ANx.UI.RefreshIfShown then ANx.UI.RefreshIfShown() end
+    if Engine.StatSelectionMask() == 0 then statPending = nil end   -- filter switched off
+    if StatAskBatch() > 0 then
+        statRecheckOn = true
+        ANx.After(STAT_RECHECK_S, StatRecheck, "stat-recheck")
+    end
+end
+
 local function NeededPredicates()
     local db = ANx.db or {}
     return {
@@ -456,6 +505,7 @@ function Engine.WarmPredicates()
     local doZex = need.zex and not warmed.zex
     local doQChar = need.qchar and not warmed.qchar
     local doStat = need.stat and not warmed.stat
+    local statAsk = doStat and {} or nil
     local first = not cachesWarm
     for _, id in ipairs(items) do
         Engine.MaybeYield("warmup")
@@ -478,7 +528,16 @@ function Engine.WarmPredicates()
         if doQSide then Engine.ItemQuestSide(id) end
         if doQChar then Engine.ItemQuestCharBlocked(id) end
         if doZex then Engine.IsZoneExclusive(id) end
-        if doStat then Engine.ItemStatMask(id) end
+        if doStat and Engine.ItemStatMask(id) == nil and not ANx.GetItemName(id) then
+            statAsk[#statAsk + 1] = id      -- not cached: ask the server (see StatAskBatch)
+        end
+    end
+    if statAsk and #statAsk > 0 then
+        statPending = statAsk
+        if not statRecheckOn and StatAskBatch() > 0 then
+            statRecheckOn = true
+            ANx.After(STAT_RECHECK_S, StatRecheck, "stat-recheck")
+        end
     end
     if doBind then warmed.bind = true end
     if doAcc then warmed.acc = true end
@@ -793,21 +852,30 @@ end
 
 -- Does this item drop from a rare / rare-elite creature? (optionally in a
 -- specific zone). Used by the World Drops "Rares only" filter.
+-- Memoized per item (the set of zones where a rare drops it): with "Rares
+-- only" on, every World Drops render re-read every world item's rows, 8.4
+-- million row reads for one Classic zone list on the heavy-tail data.
+-- Source rows only change on a data refresh, which clears the memo.
 function Engine.ItemHasRareSource(itemId, zoneName)
     local rares = ANx.RareNPCs
     if not rares then return false end
     local ZoneLower = ANx.ZoneLower
-    local zTarget = zoneName and ZoneLower(zoneName)
-    local C, MC = ANx.SRC.CREATURE, ANx.SRC.MYTHIC_CREATURE
-    local hit = false
-    EachSourceRow(itemId, function(srcType, _, objId, _, _, _, zn)
-        if (srcType == C or srcType == MC) and objId and rares[objId]
-            and (not zTarget or ZoneLower(zn) == zTarget) then
-            hit = true
-            return true
-        end
-    end)
-    return hit
+    local zs = rareMemo[itemId]
+    if zs == nil then
+        local C, MC = ANx.SRC.CREATURE, ANx.SRC.MYTHIC_CREATURE
+        zs = false
+        EachSourceRow(itemId, function(srcType, _, objId, _, _, _, zn)
+            if (srcType == C or srcType == MC) and objId and rares[objId] then
+                zs = zs or {}
+                zs[ZoneLower(zn)] = true
+            end
+        end)
+        -- before the loot DB loads there are no rows to read: don't bake in "no"
+        if ANx.LootDbLoaded() then rareMemo[itemId] = zs end
+    end
+    if not zs then return false end
+    if not zoneName then return true end
+    return zs[ZoneLower(zoneName)] == true
 end
 
 -- Filter an item list down to those with a rare source (in zoneName if given).
@@ -1071,7 +1139,12 @@ function Engine.StatAllowed(itemId)
     local want = Engine.StatSelectionMask()
     if want == 0 then return true end
     local m = Engine.ItemStatMask(itemId)
-    if not m then return false end           -- not cached yet: can't confirm, hide
+    -- not cached yet: let it through, as the Class filter does. Hiding it
+    -- hid it for the whole session - nothing ever displayed the item, so
+    -- nothing asked the server for it. Now the stat sweep (WarmPredicates)
+    -- and any row showing it request the item data, and the next recount
+    -- filters it properly.
+    if not m then return true end
     if (ANx.db.statMatch or "any") == "all" then return band(m, want) == want end
     return band(m, want) ~= 0
 end
@@ -1132,6 +1205,17 @@ local bytes = {}         -- scratch: the memo string's bytes
 local ROW_YIELD = 128    -- rows walked between slice checks inside a job
 local strchar, unpack = string.char, unpack
 
+-- The shared ordOf/ordList are only safe for a walk that runs start to finish
+-- without yielding. A job abandoned mid-item (/an reset, Rescan, a second
+-- data-ready) never ran the clean-up at the end of the walk, and the leftover
+-- ordOf[zone] entries then kept that zone out of EVERY later item's memo:
+-- all 72 zones came out with no quest, world or vendor items, and the result
+-- was saved. Walks that can yield now get their own tables (see
+-- BuildItemMemo); this also clears the shared ones in case a walk errored.
+function Engine.ResetMemoScratch()
+    ordOf, ordList = {}, {}
+end
+
 local function ZoneOrdinals()
     if zoneOrd then return zoneOrd end
     zoneOrd = {}
@@ -1154,6 +1238,12 @@ local function BuildItemMemo(itemId, inCoroutine)
     local n = getCount(itemId) or 0
     perf.rowReads = perf.rowReads + n
     perf.memoItems = perf.memoItems + 1
+    -- a walk that may yield mid-item uses private scratch: if its job is
+    -- dropped while suspended, the leftovers go with it instead of poisoning
+    -- the shared tables for every later item (only items with ROW_YIELD+
+    -- rows can yield here, so the common short walk still allocates nothing)
+    local ordOf, ordList = ordOf, ordList
+    if inCoroutine and n >= ROW_YIELD then ordOf, ordList = {}, {} end
     local rec, union, k, qv = false, 0, 0, nil
     for i = 1, n do
         if inCoroutine and i % ROW_YIELD == 0 then Engine.MaybeYield("memo-rows") end
@@ -1462,21 +1552,33 @@ function Engine.RemainingReady()
 end
 
 -- Build it on the background pump, then call back.
+-- If the filters change while it builds, the result is stale: the SAME job
+-- builds it once more for the current filters, so every caller chained onto
+-- the job (Enqueue folds same-tag requests into it) gets the fresh result.
+-- A second stale result is kept, so a steady stream of invalidations (loot
+-- with "Hide in bags" on, money with "Affordable" on) can't stop it from
+-- ever finishing. The pick and the run ranking below work the same way.
 function Engine.RemainingAsync(onDone)
     if remainingCache then
         if onDone then onDone(remainingCache) end
         return remainingCache
     end
     Engine.Enqueue(function()
-        Engine.RemainingReport(true)
+        for attempt = 1, 2 do
+            local _, stale = Engine.RemainingReport(true, attempt == 2)
+            if not stale then break end
+        end
     end, function()
         if onDone then onDone(remainingCache) end
     end, "remaining")
     return nil
 end
 
-function Engine.RemainingReport(yielding)
+-- acceptStale: keep the result even if an invalidation arrived mid-build.
+-- Returns the report, plus true when it was stale and not kept.
+function Engine.RemainingReport(yielding, acceptStale)
     if remainingCache then return remainingCache end
+    local gen0 = remainingGen
     local r = {
         char = { attunes = 0, crafted = 0, cur = {} },
         acct = { attunes = 0, crafted = 0, cur = {} },
@@ -1525,6 +1627,9 @@ function Engine.RemainingReport(yielding)
         if na ~= nb then return na > nb end
         return a < b
     end)
+    if yielding and gen0 ~= remainingGen and not acceptStale then
+        return r, true            -- built against the old filters: don't cache
+    end
     if ready then remainingCache = r end
     return r
 end
@@ -2529,8 +2634,18 @@ function Engine.PickAsync(view, which, onDone)
     end
     if not Engine.SummariesReady() then return nil end
     Engine.Enqueue(function()
-        local id = Engine.AttuneNextPick(view, { cfg = which, yielding = true })
-        pickCache[key] = { rev = Engine.rev, id = id or false }
+        -- compare the revision the pick STARTED from: stamping at the end
+        -- labeled a pick made under the old filters as current when a filter
+        -- changed mid-job (the UI's re-request is folded into this job).
+        -- Stale: pick once more in this job (see RemainingAsync).
+        for attempt = 1, 2 do
+            local rev0 = Engine.rev
+            local id = Engine.AttuneNextPick(view, { cfg = which, yielding = true })
+            if rev0 == Engine.rev or attempt == 2 then
+                pickCache[key] = { rev = Engine.rev, id = id or false }
+                break
+            end
+        end
     end, function()
         if onDone then
             local e = pickCache[key]
@@ -2721,15 +2836,34 @@ function Engine.RankZoneRuns(view, yielding, which)
             and (not scopeExp or z.exp == scopeExp)
             and (not levelOn or Engine.ZoneMinLevel(z) <= charLvl) then
             local expected, count, items = 0, 0, {}
-            for _, id in ipairs(ANx.ItemsInZone(z.zone) or {}) do
-                if yielding then Engine.MaybeYield("rank") end
-                if Engine.Eligible(id) and not ANx.CountDone(id)
-                    and Engine.ItemLevelOk(id, levelOn, charLvl) then
-                    local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())
-                    if cc > 0 then
-                        count = count + 1
-                        items[#items + 1] = id
-                        expected = expected + cc
+            -- Walk the zone's classified quest and world-drop lists, not the
+            -- raw server list: only an item with a quest or world-drop row
+            -- here can score (ClearChance reads exactly those source types),
+            -- and on a cached login the lists come back with the saved
+            -- structure while ItemsInZone was a fresh 60-140 ms server call
+            -- per zone, about 71 of them for the first Home render.
+            -- A synchronous ranking (the AttuneNext button during the login
+            -- scan) skips zones the scan hasn't classified yet rather than
+            -- classifying them inline; the scan's end re-ranks anyway.
+            local zc = (yielding or Engine.ZoneReady(z)) and Engine.ZoneData(z, yielding) or {}
+            local quest, world = zc.quest or {}, zc.world or {}
+            local inQuest
+            if #quest > 0 and #world > 0 then
+                inQuest = {}
+                for _, id in ipairs(quest) do inQuest[id] = true end
+            end
+            for pass = 1, 2 do
+                for _, id in ipairs(pass == 1 and quest or world) do
+                    if yielding then Engine.MaybeYield("rank") end
+                    if (pass == 1 or not (inQuest and inQuest[id]))
+                        and Engine.Eligible(id) and not ANx.CountDone(id)
+                        and Engine.ItemLevelOk(id, levelOn, charLvl) then
+                        local cc = Engine.ClearChance(id, z.name, ZoneRunSrc())
+                        if cc > 0 then
+                            count = count + 1
+                            items[#items + 1] = id
+                            expected = expected + cc
+                        end
                     end
                 end
             end
@@ -2761,11 +2895,14 @@ local function RunsKey(view, mode, which)
     return (which or "btn") .. "|" .. (mode or "DR") .. "|" .. ctx .. "|" .. lvl
 end
 
-function Engine.RankRuns(view, mode, yielding, which)
+-- acceptStale: keep a background result even if the filters changed while it
+-- ran. Returns the runs, plus true when they were stale and not cached.
+function Engine.RankRuns(view, mode, yielding, which, acceptStale)
     mode = mode or "DR"
     local key = RunsKey(view, mode, which)
     local c = runsCache[key]
     if c and c.rev == Engine.rev then return c.runs end
+    local rev0 = Engine.rev
     local runs = {}
     if mode ~= "Z" then
         local only = (mode == "D" and "D") or (mode == "R" and "R") or nil
@@ -2785,6 +2922,9 @@ function Engine.RankRuns(view, mode, yielding, which)
     -- only the head of the list is ever consumed (best run + ignore
     -- stepping); keeping hundreds of tails per screen just burns memory
     for i = #runs, 26, -1 do runs[i] = nil end
+    if yielding and rev0 ~= Engine.rev and not acceptStale then
+        return runs, true         -- ranked under the old filters: don't cache
+    end
     runsCache[key] = { rev = Engine.rev, runs = runs }
     return runs
 end
@@ -2826,7 +2966,12 @@ function Engine.RankRunsAsync(view, mode, onDone, which)
     if not Engine.SummariesReady() then return nil end
     local key = RunsKey(view, mode, which)
     Engine.Enqueue(function()
-        Engine.RankRuns(view, mode, true, which)
+        -- filters changed mid-ranking: rank once more in this job (see
+        -- RemainingAsync)
+        for attempt = 1, 2 do
+            local _, stale = Engine.RankRuns(view, mode, true, which, attempt == 2)
+            if not stale then break end
+        end
     end, function()
         if onDone then onDone(Engine.RunsCached(view, mode, which) or {}) end
     end, "runs:" .. key)

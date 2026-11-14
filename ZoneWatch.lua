@@ -254,11 +254,23 @@ function ANx.ZoneWatchNow(announce)
         -- caches cold (login, or a filter just switched on): the walk would
         -- read thousands of tooltips in this one frame - 800 ms seen in game.
         -- Run it as a pump job; the note and HUD follow when it finishes.
+        -- One job per tag: a request made while a walk is queued or running
+        -- only chains its callback onto that walk, which may be for the
+        -- zone just left. So each callback checks the zone the walk covered
+        -- against where the player is NOW: a match shows it, a mismatch
+        -- queues a walk for the current zone (callbacks run after the old
+        -- job is removed, so that is a fresh job, not another chain).
         Engine.Enqueue(function()
             zwItems, zwKind, zwZone = nil, nil, zname
             zwItems, zwKind = LeftItems(zname, true)
         end, function()
-            if zwZone == zname then ZoneWatchShow(zname, zwItems, zwKind, announce) end
+            local here = (_G.GetRealZoneText and _G.GetRealZoneText()) or ""
+            if zname ~= here then return end      -- left this zone meanwhile
+            if zwZone == zname then
+                ZoneWatchShow(zname, zwItems, zwKind, announce)
+            else
+                ANx.ZoneWatchNow(announce)        -- the walk was for another zone
+            end
         end, "zone-watch")
         return
     end
